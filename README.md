@@ -1,4 +1,4 @@
-# TurnSim — Simulador de Barrido de Vehículos Pesados 🚛📐
+# TurnSim — Simulador de barrido de vehículos pesados 🚛📐
 
 Aplicación web técnica de alto rendimiento, motor cinemático diferencial (Runge-Kutta de 4.º orden) y generador de planos e informes para la simulación, verificación espacial y análisis de maniobrabilidad de **vehículos pesados articulados (cabezas tractoras 4x2 + semirremolques de 3 ejes)** en accesos industriales, intersecciones urbanas, glorietas, viales y muelles logísticos.
 
