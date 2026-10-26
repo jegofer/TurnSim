@@ -1,12 +1,12 @@
 # TurnSim — Simulador de barrido de vehículos pesados 🚛📐
 
-Aplicación web técnica de alto rendimiento, motor cinemático diferencial (Runge-Kutta de 4.º orden) y generador de planos e informes para la simulación, verificación espacial y análisis de maniobrabilidad de **vehículos pesados articulados (cabezas tractoras 4x2 + semirremolques de 3 ejes)** en accesos industriales, intersecciones urbanas, glorietas, viales y muelles logísticos.
+Aplicación web técnica de alto rendimiento, motor cinemático diferencial y generador de planos e informes para la simulación, verificación espacial y análisis de maniobrabilidad de **vehículos pesados articulados (cabezas tractoras 4x2 + semirremolques de 3 ejes)** en accesos industriales, intersecciones urbanas, glorietas, viales y muelles logísticos.
 
 ---
 
 ## 1. Características principales
 
-1. **Configuración modular y combinable de vehículos de diseño (`16,50 m`):**
+1. **Configuración modular y combinable de vehículos de diseño:**
    - **Selección independiente de cabeza tractora y semirremolque:** el usuario puede combinar cualquier cabeza tractora (Renault Trucks T 480, Mercedes-Benz Actros 1845 LS, DAF FT XF 480, Volvo FH 500, Scania R 450, etc.) con cualquier semirremolque (Schmitz Cargobull S.KO Cool frigorífico, Schmitz S.CS lonas correderas, Krone Profi Liner, Cisterna ADR, etc.).
    - **Carga de conjunto articulado preconfigurado al inicio:** arranca automáticamente con un conjunto estándar verificado (Renault Trucks T 480 + Schmitz S.KO Cool) listo para simular.
    - **Personalización geométrica en vivo:** edición paramétrica de batalla ($L_{wb}$, $L_t$), voladizos delantero/trasero, posición de quinta rueda (*kingpin offset* $h$), ancho de vía, anchura de carrocería y ángulos máximos de dirección y articulación con validación normativa en tiempo real (Directiva 96/53/CE y RD 2822/1998).
