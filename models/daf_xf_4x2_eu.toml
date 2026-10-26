@@ -1,0 +1,37 @@
+# Configuración 3: DAF FT XF 480 (4x2, batalla 3.800 m) + Semirremolque Europeo 3 ejes (13.62 m)
+[vehicle]
+wheelbase      = 3.800   # Batalla de la cabeza tractora (DAF FT XF 480 4x2)
+front_overhang = 1.370   # Voladizo delantero oficial DAF (HV = 1.370 m)
+rear_overhang  = 0.750   # Voladizo trasero oficial DAF (AE = 0.750 m, longitud total TL = 5.920 m)
+width          = 2.550   # Anchura de la tractora sin retrovisores
+hitch_offset   = 0.540   # Quinta rueda 0.540 m por delante del eje motriz
+
+[vehicle.trailer]
+wheelbase      = 7.700   # Kingpin al centro del trídem
+front_overhang = 1.600   # Voladizo delantero estándar
+rear_overhang  = 4.200   # Voladizo trasero tras el centro del trídem
+width          = 2.550   # Anchura reglamentaria
+
+[[path]]
+type   = "straight"
+length = 15.0
+
+[[path]]
+type   = "arc"
+radius = 12.5
+angle  = 90.0
+
+[[path]]
+type   = "straight"
+length = 15.0
+
+[render]
+ghost_interval = 2.5
+px_per_m       = 50.0
+straight_step  = 0.05
+arc_step       = 0.5
+show_ghosts    = true
+show_axles     = true
+show_reference_point = true
+show_axle_traces = true
+show_scale     = true

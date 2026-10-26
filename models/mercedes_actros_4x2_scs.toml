@@ -1,0 +1,37 @@
+# Configuración 2: Mercedes-Benz Actros 1845 LS (4x2, batalla 3.700 m) + Schmitz Cargobull S.CS Universal (3 ejes)
+[vehicle]
+wheelbase      = 3.700   # Batalla de la cabeza tractora (Mercedes-Benz Actros 1845 LS 4x2)
+front_overhang = 1.440   # Voladizo delantero (ficha oficial Mercedes-Benz Actros)
+rear_overhang  = 1.050   # Voladizo trasero del bastidor
+width          = 2.550   # Anchura de la tractora sin retrovisores
+hitch_offset   = 0.585   # Quinta rueda 0.585 m por delante del eje motriz
+
+[vehicle.trailer]
+wheelbase      = 7.700   # Kingpin al centro del trídem (Schmitz Cargobull S.CS Universal)
+front_overhang = 1.600   # Voladizo delantero estándar ISO 1726
+rear_overhang  = 4.200   # Voladizo trasero tras el centro del trídem (kingpin a trasera = 11.90 m)
+width          = 2.550   # Anchura reglamentaria semirremolque lona
+
+[[path]]
+type   = "straight"
+length = 15.0
+
+[[path]]
+type   = "arc"
+radius = 12.5
+angle  = 90.0
+
+[[path]]
+type   = "straight"
+length = 15.0
+
+[render]
+ghost_interval = 2.5
+px_per_m       = 50.0
+straight_step  = 0.05
+arc_step       = 0.5
+show_ghosts    = true
+show_axles     = true
+show_reference_point = true
+show_axle_traces = true
+show_scale     = true

@@ -1,0 +1,36 @@
+[vehicle]
+wheelbase      = 3.8    # Batalla de la cabeza tractora (eje delantero a eje motriz)
+front_overhang = 1.4    # Voladizo delantero (parachoques a eje delantero)
+rear_overhang  = 0.8    # Voladizo trasero tras eje motriz
+width          = 2.55   # Anchura reglamentaria de la tractora (RD 2822/1998)
+hitch_offset   = 0.3    # Quinta rueda situada 0.30 m por delante del eje motriz
+
+[vehicle.trailer]
+wheelbase      = 7.7    # Distancia desde pivote de enganche (kingpin) al centro del trídem del semirremolque
+front_overhang = 1.5    # Parte delantera del semirremolque por delante del pivote
+rear_overhang  = 2.8    # Voladizo trasero del semirremolque (longitud total del conjunto ≈ 16.50 m)
+width          = 2.55   # Anchura del semirremolque
+
+[[path]]
+type   = "straight"
+length = 15.0           # Aproximación recta de 15 metros
+
+[[path]]
+type   = "arc"
+radius = 12.5           # Radio de curvatura del eje de referencia: 12.50 m (típico vial interior)
+angle  = 90.0           # Giro de 90 grados a la izquierda
+
+[[path]]
+type   = "straight"
+length = 15.0           # Salida recta de 15 metros
+
+[render]
+ghost_interval = 2.5
+px_per_m       = 50.0
+straight_step  = 0.05
+arc_step       = 0.5
+show_ghosts    = true
+show_axles     = true
+show_reference_point = true
+show_axle_traces = true
+show_scale     = true

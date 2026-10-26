@@ -1,0 +1,24 @@
+{
+  "name": "turnsim",
+  "version": "1.0.0",
+  "description": "Simulador técnico de trayectorias de barrido de vehículos pesados articulados",
+  "main": "web/index.html",
+  "type": "module",
+  "scripts": {
+    "build": "node scripts/build_standalone_html.mjs",
+    "test": "node tests/test_engine.mjs",
+    "start": "python3 -m http.server 8000 --directory web/"
+  },
+  "keywords": [
+    "swept-path",
+    "turnsim",
+    "heavy-vehicles",
+    "tractrix",
+    "runge-kutta",
+    "threejs",
+    "cad",
+    "transport-engineering"
+  ],
+  "author": "TurnSim Project",
+  "license": "MIT"
+}

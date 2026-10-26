@@ -1,0 +1,6 @@
+ezdxf>=1.4.0
+fonttools>=4.60.0
+numpy>=2.0.0
+schlepp>=0.1.0
+shapely>=2.0.0
+typing_extensions>=4.10.0

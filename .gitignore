@@ -1,0 +1,40 @@
+# Archivo de ignorados para control de versiones (Git)
+# Proyecto: TurnSim — Simulador de Barrido de Vehículos Pesados
+
+# Entornos virtuales Python
+.venv/
+venv/
+env/
+ENV/
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# Documentación interna y archivos de especificación no publicables en GitHub
+PROMT_ORIGINAL.md
+docs/
+docs/**
+
+# Salidas de compilación / distribución
+build/
+dist/
+*.egg-info/
+
+# Archivos de depuración y logs
+*.log
+.coverage
+htmlcov/
+.pytest_cache/
+
+# IDEs y editores locales
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Archivos temporales de visualización local
+local_scratch/
+*.tmp
