@@ -26,6 +26,11 @@ import {
   exportGraphicViewSnapshot,
   downloadTextFile
 } from "./export/exporters.js";
+import {
+  parseDXF,
+  detectSuggestedLayerMapping,
+  buildScenarioFromDXF
+} from "./export/dxf_importer.js";
 import { Viewer2D } from "./view2d/viewer2d.js";
 import { Viewer3D } from "./view3d/viewer3d.js";
 
@@ -53,6 +58,8 @@ export class SweptPathApp {
     this.viewMode = "2d"; // '2d' | '3d' | 'split'
     this.simResult = null;
     this.interferenceReport = null;
+    this.cadBackgroundEntities = [];
+    this.currentParsedDXF = null;
 
     // Estado de reproducción
     this.isPlaying = false;
@@ -215,6 +222,9 @@ export class SweptPathApp {
       this.recomputeAll(true);
     });
 
+    // Importador DXF en cliente (Sección C)
+    this._initDxfImporterUI();
+
     // Pose inicial
     for (const [id, key] of [
       ["inp-pose-x", "x"],
@@ -357,6 +367,7 @@ export class SweptPathApp {
       ["chk-layer-refs", "refTraces"],
       ["chk-layer-ghosts", "ghosts"],
       ["chk-layer-obstacles", "obstacles"],
+      ["chk-layer-cad-bg", "cadBackground"],
       ["chk-layer-dims", "dimensions"],
       ["chk-layer-axles", "axlesAndPoints"],
       ["chk-layer-grid", "grid"]
@@ -802,7 +813,8 @@ export class SweptPathApp {
       vehicle: this.vehicle,
       simResult: this.simResult,
       obstacles: this.obstacles,
-      interferenceReport: this.interferenceReport
+      interferenceReport: this.interferenceReport,
+      cadBackgroundEntities: this.cadBackgroundEntities
     });
     this.viewer3D.setData({
       vehicle: this.vehicle,
@@ -839,7 +851,8 @@ export class SweptPathApp {
       vehicle: this.vehicle,
       simResult: this.simResult,
       obstacles: this.obstacles,
-      interferenceReport: this.interferenceReport
+      interferenceReport: this.interferenceReport,
+      cadBackgroundEntities: this.cadBackgroundEntities
     });
 
     this.viewer3D.setData({
@@ -904,6 +917,239 @@ export class SweptPathApp {
   _updatePlayButtonUI() {
     const btn = document.getElementById("btn-play-toggle");
     btn.textContent = this.isPlaying ? "⏸ Pausar" : "▶ Reproducir";
+  }
+
+  // ---------------------------------------------------------------------------
+  // Módulo de Importación DXF (Detección automática de capas y selector asistido)
+  // ---------------------------------------------------------------------------
+  _initDxfImporterUI() {
+    const fileInput = document.getElementById("inp-dxf-file");
+    const dropZone = document.getElementById("dxf-drop-zone");
+
+    if (dropZone && fileInput) {
+      dropZone.addEventListener("click", () => fileInput.click());
+
+      dropZone.addEventListener("dragover", (e) => {
+        e.preventDefault();
+        dropZone.classList.add("dragover");
+      });
+      dropZone.addEventListener("dragleave", () => {
+        dropZone.classList.remove("dragover");
+      });
+      dropZone.addEventListener("drop", (e) => {
+        e.preventDefault();
+        dropZone.classList.remove("dragover");
+        if (e.dataTransfer && e.dataTransfer.files && e.dataTransfer.files[0]) {
+          this._loadDxfFile(e.dataTransfer.files[0]);
+        }
+      });
+
+      fileInput.addEventListener("change", (e) => {
+        if (e.target.files && e.target.files[0]) {
+          this._loadDxfFile(e.target.files[0]);
+        }
+      });
+    }
+  }
+
+  _loadDxfFile(file) {
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = (e) => {
+      try {
+        const text = e.target.result;
+        const parsed = parseDXF(text);
+        if (!parsed.layers || parsed.layers.length === 0) {
+          alert("El archivo DXF no contiene capas ni entidades legibles.");
+          return;
+        }
+        this.currentParsedDXF = parsed;
+        const suggested = detectSuggestedLayerMapping(parsed.layers);
+        this._showDxfLayerMappingModal(parsed, suggested, file.name);
+      } catch (err) {
+        console.error("Error al procesar archivo DXF:", err);
+        alert(`Error al procesar el archivo DXF: ${err.message}`);
+      }
+    };
+    reader.onerror = () => {
+      alert("No se pudo leer el archivo seleccionado.");
+    };
+    reader.readAsText(file);
+  }
+
+  _showDxfLayerMappingModal(parsedDxf, suggested, fileName) {
+    const existing = document.getElementById("dxf-modal-container");
+    if (existing) existing.remove();
+
+    const backdrop = document.createElement("div");
+    backdrop.id = "dxf-modal-container";
+    backdrop.className = "modal-backdrop";
+
+    const layers = parsedDxf.layers;
+
+    const buildOptions = (selectedVal, noneLabel = "-- Ninguna (Omitir) --") => {
+      let html = `<option value="">${noneLabel}</option>`;
+      for (const l of layers) {
+        const stats = parsedDxf.layerStats[l];
+        const count = stats ? ` (${stats.count} ent.)` : "";
+        const isSel = l === selectedVal ? "selected" : "";
+        html += `<option value="${l}" ${isSel}>${l}${count}</option>`;
+      }
+      return html;
+    };
+
+    const buildMultiOptions = (selectedList = []) => {
+      let html = "";
+      for (const l of layers) {
+        const stats = parsedDxf.layerStats[l];
+        const count = stats ? ` (${stats.count})` : "";
+        const isSel = selectedList.includes(l) ? "selected" : "";
+        html += `<option value="${l}" ${isSel}>${l}${count}</option>`;
+      }
+      return html;
+    };
+
+    const trajMatchBadge = suggested.trajectoryLayer
+      ? `<span class="layer-match-badge">✓ Detectada automáticamente</span>`
+      : `<span style="font-size:10px;color:#f59e0b;">Selección requerida o manual</span>`;
+
+    const obsMatchBadge = suggested.obstacleLayers.length > 0
+      ? `<span class="layer-match-badge">✓ ${suggested.obstacleLayers.length} capa(s) sugeridas</span>`
+      : "";
+
+    backdrop.innerHTML = `
+      <div class="modal-dialog">
+        <div class="modal-header">
+          <h3>📂 Importación de Plano CAD DXF: ${fileName}</h3>
+          <button type="button" class="btn btn-sm btn-outline" id="btn-modal-close">✕</button>
+        </div>
+        <div class="modal-body">
+          <p style="margin-top:0;margin-bottom:12px;color:#94a3b8;font-size:11px;">
+            TurnSim ha analizado el plano y ha asignado las capas que coinciden con la plantilla técnica recomendada.
+            Puede confirmar o modificar la correspondencia de capas desde los desplegables:
+          </p>
+
+          <!-- 1. EJE DE TRAYECTORIA -->
+          <div class="layer-field-row">
+            <div class="layer-field-label">
+              <span>Eje / Trayectoria del camión:</span>
+              ${trajMatchBadge}
+            </div>
+            <select id="modal-sel-trajectory" style="width:100%;">
+              ${buildOptions(suggested.trajectoryLayer, "-- No importar trayectoria (conservar actual) --")}
+            </select>
+            <div class="layer-desc-hint">Polilínea o sucesión de aristas que debe recorrer el eje motriz de la tractora.</div>
+          </div>
+
+          <!-- Sentido y radio de acuerdo -->
+          <div class="form-row" style="margin-bottom:12px;">
+            <div>
+              <label class="form-label" for="modal-sel-dir">Sentido de marcha</label>
+              <select id="modal-sel-dir" style="width:100%;">
+                <option value="1" selected>Avance (Sentido de dibujo)</option>
+                <option value="-1">Marcha atrás (Retroceso)</option>
+              </select>
+            </div>
+            <div>
+              <label class="form-label" for="modal-inp-agreement">Radio mínimo acuerdo (m)</label>
+              <input type="number" id="modal-inp-agreement" value="12.5" step="0.5" min="5" max="50" style="width:100%;" />
+            </div>
+          </div>
+
+          <!-- 2. OBSTÁCULOS Y EDIFICIOS -->
+          <div class="layer-field-row">
+            <div class="layer-field-label">
+              <span>Obstáculos físicos / Edificaciones:</span>
+              ${obsMatchBadge}
+            </div>
+            <select id="modal-sel-obstacles" multiple size="3" style="width:100%;background:#0b1120;color:#f8fafc;border:1px solid #334155;border-radius:4px;padding:4px;">
+              ${buildMultiOptions(suggested.obstacleLayers)}
+            </select>
+            <div class="layer-desc-hint">Elementos que provocan colisión física (Mantenga Ctrl/Cmd para selección múltiple).</div>
+          </div>
+
+          <!-- 3. BORDILLOS Y DELIMITACIONES -->
+          <div class="layer-field-row">
+            <div class="layer-field-label">
+              <span>Bordes de calzada / Bordillos:</span>
+            </div>
+            <select id="modal-sel-boundaries" multiple size="2" style="width:100%;background:#0b1120;color:#f8fafc;border:1px solid #334155;border-radius:4px;padding:4px;">
+              ${buildMultiOptions(suggested.boundaryLayers)}
+            </select>
+          </div>
+
+          <!-- 4. ZONAS RESTRINGIDAS -->
+          <div class="layer-field-row">
+            <div class="layer-field-label">
+              <span>Zonas restringidas / Excluidas:</span>
+            </div>
+            <select id="modal-sel-restricted" multiple size="2" style="width:100%;background:#0b1120;color:#f8fafc;border:1px solid #334155;border-radius:4px;padding:4px;">
+              ${buildMultiOptions(suggested.restrictedLayers)}
+            </select>
+          </div>
+        </div>
+
+        <div class="modal-footer">
+          <button type="button" class="btn btn-outline btn-sm" id="btn-modal-cancel">Cancelar</button>
+          <button type="button" class="btn btn-primary btn-sm" id="btn-modal-apply">✓ Aplicar Plano y Simular</button>
+        </div>
+      </div>
+    `;
+
+    document.body.appendChild(backdrop);
+
+    const closeModal = () => backdrop.remove();
+    document.getElementById("btn-modal-close").addEventListener("click", closeModal);
+    document.getElementById("btn-modal-cancel").addEventListener("click", closeModal);
+
+    document.getElementById("btn-modal-apply").addEventListener("click", () => {
+      const trajLayer = document.getElementById("modal-sel-trajectory").value || null;
+
+      const getSelected = (selId) => {
+        const el = document.getElementById(selId);
+        return Array.from(el.selectedOptions).map((o) => o.value);
+      };
+
+      const obsLayers = getSelected("modal-sel-obstacles");
+      const bndLayers = getSelected("modal-sel-boundaries");
+      const rstLayers = getSelected("modal-sel-restricted");
+      const direction = parseInt(document.getElementById("modal-sel-dir").value, 10) || 1;
+      const agreementRadius = parseFloat(document.getElementById("modal-inp-agreement").value) || 12.5;
+
+      const mapping = {
+        trajectoryLayer: trajLayer,
+        obstacleLayers: obsLayers,
+        boundaryLayers: bndLayers,
+        restrictedLayers: rstLayers
+      };
+
+      try {
+        const scenario = buildScenarioFromDXF(parsedDxf, mapping, { direction, agreementRadius });
+
+        if (scenario.maneuver) {
+          this.maneuver = scenario.maneuver;
+          this._populateManeuverInputs();
+          this._renderSegmentsListUI();
+        }
+
+        if (scenario.obstacles.length > 0) {
+          this.obstacles = scenario.obstacles;
+          this._renderObstaclesListUI();
+        }
+
+        this.cadBackgroundEntities = scenario.backgroundEntities || [];
+
+        closeModal();
+        this.recomputeAll(true);
+
+        if (scenario.bounds && this.viewer2D) {
+          setTimeout(() => this.viewer2D.fitToScene(), 50);
+        }
+      } catch (err) {
+        console.error("Error al construir escenario desde DXF:", err);
+        alert(`Error al generar la simulación desde el DXF: ${err.message}`);
+      }
+    });
   }
 
   _startAnimationLoop() {

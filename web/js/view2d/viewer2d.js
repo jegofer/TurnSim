@@ -22,9 +22,11 @@ export class Viewer2D {
     this.obstacles = [];
     this.interferenceReport = null;
     this.currentStateIndex = 0;
+    this.cadBackgroundEntities = []; // Líneas y aristas de contexto DXF
 
     this.layers = {
       grid: true,
+      cadBackground: true,
       envelope: true,
       margin: true,
       refTraces: true,
@@ -323,6 +325,9 @@ export class Viewer2D {
       if (obs.enabled === false) continue;
       for (const p of getObstacleVertices(obs)) addPt(p[0], p[1]);
     }
+    for (const ent of this.cadBackgroundEntities || []) {
+      for (const p of ent.vertices || []) addPt(p[0], p[1]);
+    }
 
     if (!Number.isFinite(minX)) return;
     this.camX = 0.5 * (minX + maxX);
@@ -333,11 +338,14 @@ export class Viewer2D {
     this.render();
   }
 
-  setData({ vehicle, simResult, obstacles, interferenceReport }) {
+  setData({ vehicle, simResult, obstacles, interferenceReport, cadBackgroundEntities }) {
     this.vehicle = vehicle;
     this.simResult = simResult;
     this.obstacles = obstacles || [];
     this.interferenceReport = interferenceReport || null;
+    if (Array.isArray(cadBackgroundEntities)) {
+      this.cadBackgroundEntities = cadBackgroundEntities;
+    }
     if (this.simResult && this.currentStateIndex >= this.simResult.states.length) {
       this.currentStateIndex = 0;
     }
@@ -361,6 +369,11 @@ export class Viewer2D {
 
     if (this.layers.grid) {
       this._drawGrid(ctx, w, h);
+    }
+
+    // Capa de dibujo de fondo CAD DXF
+    if (this.layers.cadBackground && this.cadBackgroundEntities && this.cadBackgroundEntities.length > 0) {
+      this._drawCadBackground(ctx);
     }
 
     if (!this.simResult || !this.simResult.states || this.simResult.states.length === 0) {
@@ -556,6 +569,21 @@ export class Viewer2D {
 
     this._drawPolyline(ctx, leftPts, strokeColor, 2.2, dash);
     this._drawPolyline(ctx, rightPts, strokeColor, 2.2, dash);
+    ctx.restore();
+  }
+
+  _drawCadBackground(ctx) {
+    if (!this.cadBackgroundEntities) return;
+    ctx.save();
+    ctx.strokeStyle = "rgba(148, 163, 184, 0.40)";
+    ctx.lineWidth = 1.0;
+    for (const ent of this.cadBackgroundEntities) {
+      if (ent.closed) {
+        this._drawPolygon(ctx, ent.vertices, "rgba(30, 41, 59, 0.25)", "rgba(148, 163, 184, 0.45)", 1.0, []);
+      } else {
+        this._drawPolyline(ctx, ent.vertices, "rgba(148, 163, 184, 0.40)", 1.0, []);
+      }
+    }
     ctx.restore();
   }
 

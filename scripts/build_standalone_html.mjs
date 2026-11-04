@@ -22,6 +22,7 @@ const MODULE_ORDER = [
   "js/engine/envelope.js",
   "js/engine/collisions.js",
   "js/export/exporters.js",
+  "js/export/dxf_importer.js",
   "js/view2d/viewer2d.js",
   "js/view3d/viewer3d.js",
   "js/app.js"
@@ -190,6 +191,13 @@ ${cssContent}
         <details class="panel-section" open>
           <summary>C. Configuración de la maniobra</summary>
           <div class="section-body">
+            <!-- Zona de Carga de archivo DXF -->
+            <div id="dxf-drop-zone" class="dxf-drop-zone" title="Arrastre aquí un archivo .dxf o haga clic para seleccionarlo">
+              <div class="dxf-drop-title">📂 Cargar Plano CAD (.DXF)</div>
+              <div class="dxf-drop-hint">Arrastre su archivo DXF con eje y obstáculos o haga clic para examinar</div>
+              <input type="file" id="inp-dxf-file" accept=".dxf" style="display:none;" />
+            </div>
+
             <div class="form-group">
               <label class="form-label" for="select-scenario">Escenario viario preconfigurado</label>
               <select id="select-scenario"></select>
@@ -279,6 +287,7 @@ ${cssContent}
               <label class="layer-check"><input type="checkbox" id="chk-layer-refs" checked /> Trazas ejes ref.</label>
               <label class="layer-check"><input type="checkbox" id="chk-layer-ghosts" checked /> Siluetas paso</label>
               <label class="layer-check"><input type="checkbox" id="chk-layer-obstacles" checked /> Obstáculos viarios</label>
+              <label class="layer-check"><input type="checkbox" id="chk-layer-cad-bg" checked /> Plano fondo CAD</label>
               <label class="layer-check"><input type="checkbox" id="chk-layer-dims" checked /> Cotas y holguras</label>
               <label class="layer-check"><input type="checkbox" id="chk-layer-axles" checked /> Ruedas y kingpin</label>
               <label class="layer-check"><input type="checkbox" id="chk-layer-grid" checked /> Cuadrícula métrica</label>

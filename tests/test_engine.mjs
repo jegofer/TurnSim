@@ -565,6 +565,82 @@ for (const [id, profile] of Object.entries(VEHICLE_CATALOG)) {
   );
 }
 
+// -----------------------------------------------------------------------------
+// TEST-13: Módulo de importación y análisis de archivos CAD DXF en cliente
+// -----------------------------------------------------------------------------
+{
+  const {
+    parseDXF,
+    detectSuggestedLayerMapping,
+    buildScenarioFromDXF
+  } = await import("../web/js/export/dxf_importer.js");
+
+  const dxfSample = `  0
+SECTION
+  2
+ENTITIES
+  0
+LWPOLYLINE
+  8
+TURNSIM_TRAYECTORIA
+ 70
+0
+ 10
+0.0
+ 20
+0.0
+ 10
+25.0
+ 20
+0.0
+ 10
+25.0
+ 20
+25.0
+  0
+LWPOLYLINE
+  8
+EDIFICIOS
+ 70
+1
+ 10
+10.0
+ 20
+5.0
+ 10
+15.0
+ 20
+5.0
+ 10
+15.0
+ 20
+10.0
+ 10
+10.0
+ 20
+10.0
+  0
+ENDSEC
+  0
+EOF
+`;
+
+  const parsed = parseDXF(dxfSample);
+  const layersOk = parsed.layers.includes("TURNSIM_TRAYECTORIA") && parsed.layers.includes("EDIFICIOS");
+  const suggested = detectSuggestedLayerMapping(parsed.layers);
+  const mappingOk = suggested.trajectoryLayer === "TURNSIM_TRAYECTORIA" && suggested.obstacleLayers.includes("EDIFICIOS");
+
+  const scenario = buildScenarioFromDXF(parsed, suggested, { direction: 1, agreementRadius: 10.0 });
+  const scenarioOk = scenario.maneuver && scenario.maneuver.segments.length > 0 && scenario.obstacles.length === 1;
+
+  assertCondition(
+    "TEST-13",
+    "Parser DXF en cliente, autodetección de capas sugeridas y generación de maniobra/obstáculos",
+    layersOk && mappingOk && scenarioOk,
+    `capas=[${parsed.layers.join(", ")}], obstáculos extraídos=${scenario.obstacles.length}, tramos=${scenario.maneuver.segments.length}`
+  );
+}
+
 console.log("\n==================================================================");
 console.log(` RESUMEN DE VERIFICACIÓN: ${passed} superadas, ${failed} fallidas`);
 console.log("==================================================================");
