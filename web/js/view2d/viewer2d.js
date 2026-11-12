@@ -4,6 +4,62 @@
  */
 
 import { getObstacleVertices } from "../engine/collisions.js";
+import { sampleCatmullRomSpline } from "../engine/kinematics.js";
+
+/**
+ * Conversión de coordenadas UTM (ETRS89 / WGS84) a coordenadas geográficas (Latitud, Longitud en grados decimales).
+ * Algoritmo geodésico estándar sobre el elipsoide GRS80 / WGS84 con precisión milimétrica.
+ */
+export function utmToLatLon(easting, northing, zone = 30, northern = true) {
+  const a = 6378137.0; // semieje mayor
+  const f = 1 / 298.257223563; // aplanamiento
+  const b = a * (1 - f);
+  const e = Math.sqrt(1 - (b / a) ** 2);
+  const e1 = (1 - Math.sqrt(1 - e * e)) / (1 + Math.sqrt(1 - e * e));
+  const k0 = 0.9996;
+
+  const x = Number(easting) - 500000.0;
+  const y = northern ? Number(northing) : Number(northing) - 10000000.0;
+  const m = y / k0;
+  const mu = m / (a * (1 - (e ** 2) / 4 - (3 * (e ** 4)) / 64 - (5 * (e ** 6)) / 256));
+
+  const phi1 =
+    mu +
+    ((3 * e1) / 2 - (27 * (e1 ** 3)) / 32) * Math.sin(2 * mu) +
+    ((21 * (e1 ** 2)) / 16 - (55 * (e1 ** 4)) / 32) * Math.sin(4 * mu) +
+    ((151 * (e1 ** 3)) / 96) * Math.sin(6 * mu);
+
+  const sinPhi1 = Math.sin(phi1);
+  const cosPhi1 = Math.cos(phi1);
+  const tanPhi1 = Math.tan(phi1);
+
+  const n1 = a / Math.sqrt(1 - (e ** 2) * (sinPhi1 ** 2));
+  const t1 = tanPhi1 ** 2;
+  const c1 = ((e ** 2) / (1 - e ** 2)) * (cosPhi1 ** 2);
+  const r1 = (a * (1 - e ** 2)) / Math.pow(1 - (e ** 2) * (sinPhi1 ** 2), 1.5);
+  const d = x / (n1 * k0);
+
+  const latRad =
+    phi1 -
+    ((n1 * tanPhi1) / r1) *
+      ((d ** 2) / 2 -
+        (5 + 3 * t1 + 10 * c1 - 4 * (c1 ** 2) - 9 * ((e ** 2) / (1 - e ** 2))) * ((d ** 4) / 24) +
+        (61 + 90 * t1 + 298 * c1 + 45 * (t1 ** 2) - 252 * ((e ** 2) / (1 - e ** 2)) - 3 * (c1 ** 2)) *
+          ((d ** 6) / 720));
+
+  const lonRad =
+    (d -
+      (1 + 2 * t1 + c1) * ((d ** 3) / 6) +
+      (5 - 2 * c1 + 28 * t1 - 3 * (c1 ** 2) + 8 * ((e ** 2) / (1 - e ** 2)) + 24 * (t1 ** 2)) *
+        ((d ** 5) / 120)) /
+    cosPhi1;
+
+  const latDeg = (latRad * 180) / Math.PI;
+  const centralMeridian = (Number(zone) - 1) * 6 - 180 + 3;
+  const lonDeg = centralMeridian + (lonRad * 180) / Math.PI;
+
+  return { lat: Number(latDeg.toFixed(6)), lon: Number(lonDeg.toFixed(6)) };
+}
 
 export class Viewer2D {
   constructor(canvas) {
@@ -23,6 +79,7 @@ export class Viewer2D {
     this.interferenceReport = null;
     this.currentStateIndex = 0;
     this.cadBackgroundEntities = []; // Líneas y aristas de contexto DXF
+    this.isComputing = false;
 
     this.layers = {
       grid: true,
@@ -34,14 +91,38 @@ export class Viewer2D {
       ghosts: true,
       obstacles: true,
       dimensions: true,
-      axlesAndPoints: true
+      axlesAndPoints: true,
+      pnoa: false
     };
+
+    // Capa de Ortofotografías Aéreas PNOA (Instituto Geográfico Nacional de España - IGN)
+    this.pnoaConfig = {
+      enabled: false,
+      opacity: 0.8,
+      centerLat: 40.3872, // Glorieta M-501 (Madrid) por defecto
+      centerLon: -3.8785,
+      utmZone: 30,
+      anchorWorldX: 0.0,
+      anchorWorldY: 0.0
+    };
+    this.pnoaTileCache = new Map();
 
     this.isDragging = false;
     this.draggedObstacle = null;
     this.lastMouse = { x: 0, y: 0 };
     this.hoverWorld = null;
     this.onObstacleMoved = null;
+
+    // Modo interactivo de edición de trayectoria por waypoints (UX-04)
+    this.waypointMode = false;
+    this.trajectoryMode = "spline"; // 'spline' (Spline CAD continua) | 'fillet' (Polilínea con acuerdos)
+    this.minVehicleTurnRadius = 6.8;
+    this.waypoints = [];
+    this.draggedWaypointIndex = -1;
+    this.hoveredWaypointIndex = -1;
+    this.onWaypointsChange = null;
+    this.onWaypointDragEnd = null;
+    this.onWaypointModeChange = null;
 
     // Herramienta de medición de distancias
     this.measureMode = false;
@@ -56,6 +137,7 @@ export class Viewer2D {
 
   _bindEvents() {
     window.addEventListener("resize", () => this.resize());
+    this.canvas.style.touchAction = "none";
 
     window.addEventListener("keydown", (e) => {
       if (e.key === "Escape") {
@@ -63,13 +145,42 @@ export class Viewer2D {
           this.clearMeasurement();
           if (this.measureMode) this.toggleMeasureMode(false);
         }
+        if (this.waypointMode) {
+          this.toggleWaypointMode(false);
+        }
       }
     });
 
     this.canvas.addEventListener("contextmenu", (e) => {
+      e.preventDefault();
+      if (this.waypointMode && this.hoverWorld) {
+        const [wx, wy] = this.hoverWorld;
+        const hitIdx = this._findWaypointAt(wx, wy);
+        if (hitIdx >= 0) {
+          this.waypoints.splice(hitIdx, 1);
+          if (typeof this.onWaypointsChange === "function") {
+            this.onWaypointsChange(this.waypoints);
+          }
+          this.render();
+          return;
+        }
+      }
       if (this.measureMode || this.measurePoints.length > 0) {
-        e.preventDefault();
         this.clearMeasurement();
+      }
+    });
+
+    this.canvas.addEventListener("dblclick", () => {
+      if (this.waypointMode && this.hoverWorld) {
+        const [wx, wy] = this.hoverWorld;
+        const hitIdx = this._findWaypointAt(wx, wy);
+        if (hitIdx >= 0) {
+          this.waypoints.splice(hitIdx, 1);
+          if (typeof this.onWaypointsChange === "function") {
+            this.onWaypointsChange(this.waypoints);
+          }
+          this.render();
+        }
       }
     });
 
@@ -81,7 +192,8 @@ export class Viewer2D {
       const beforeWorld = this.screenToWorld(mx, my);
 
       const zoomFactor = e.deltaY < 0 ? 1.14 : 1 / 1.14;
-      this.scale = Math.max(3.0, Math.min(140.0, this.scale * zoomFactor));
+      // Permite desde vista comarcal/provincial (0.005 px/m ~ 1:750.000) hasta detalle milimétrico (220 px/m)
+      this.scale = Math.max(0.005, Math.min(220.0, this.scale * zoomFactor));
 
       const afterWorld = this.screenToWorld(mx, my);
       this.camX += beforeWorld[0] - afterWorld[0];
@@ -89,14 +201,50 @@ export class Viewer2D {
       this.render();
     }, { passive: false });
 
-    this.canvas.addEventListener("mousedown", (e) => {
-      if (e.button !== 0) return;
+    // Pointer Events unificados para ratón, lápiz óptico y pantalla táctil (UX-08)
+    this.canvas.addEventListener("pointerdown", (e) => {
       const rect = this.canvas.getBoundingClientRect();
       const mx = e.clientX - rect.left;
       const my = e.clientY - rect.top;
       this.lastMouse = { x: mx, y: my };
-
       const [wx, wy] = this.screenToWorld(mx, my);
+
+      if (e.button === 2) {
+        return;
+      }
+      if (e.button !== 0) return;
+
+      try {
+        this.canvas.setPointerCapture(e.pointerId);
+        this._capturedPointerId = e.pointerId;
+      } catch (_) {}
+
+      // 1. Modo edición gráfica de waypoints
+      if (this.waypointMode) {
+        const hitIdx = this._findWaypointAt(wx, wy);
+        if (hitIdx >= 0) {
+          this.draggedWaypointIndex = hitIdx;
+          this.render();
+          return;
+        }
+
+        const segIdx = this._findWaypointSegmentAt(wx, wy);
+        const newPt = [Number(wx.toFixed(2)), Number(wy.toFixed(2))];
+        if (segIdx >= 0) {
+          this.waypoints.splice(segIdx + 1, 0, newPt);
+          this.draggedWaypointIndex = segIdx + 1;
+        } else {
+          this.waypoints.push(newPt);
+          this.draggedWaypointIndex = this.waypoints.length - 1;
+        }
+        if (typeof this.onWaypointsChange === "function") {
+          this.onWaypointsChange(this.waypoints);
+        }
+        this.render();
+        return;
+      }
+
+      // 2. Modo medición de distancias
       const snap = this._findSnapPoint(wx, wy);
       const targetPt = snap ? [snap.x, snap.y] : [Number(wx.toFixed(3)), Number(wy.toFixed(3))];
 
@@ -113,7 +261,7 @@ export class Viewer2D {
         return;
       }
 
-      // Si se pulsa con Shift sobre el centro de un obstáculo editable (rect o circle), permite arrastrarlo
+      // 3. Arrastre de obstáculos con Shift
       if (e.shiftKey && this.obstacles && this.layers.obstacles) {
         for (const obs of this.obstacles) {
           if (obs.enabled === false || obs.shape === "polyline") continue;
@@ -123,14 +271,35 @@ export class Viewer2D {
           }
         }
       }
+
+      // 4. Panning de cámara
       this.isDragging = true;
     });
 
-    window.addEventListener("mousemove", (e) => {
+    window.addEventListener("pointermove", (e) => {
       const rect = this.canvas.getBoundingClientRect();
       const mx = e.clientX - rect.left;
       const my = e.clientY - rect.top;
       this.hoverWorld = this.screenToWorld(mx, my);
+      const [wx, wy] = this.hoverWorld;
+
+      if (this.draggedWaypointIndex >= 0 && this.waypoints[this.draggedWaypointIndex]) {
+        this.waypoints[this.draggedWaypointIndex] = [Number(wx.toFixed(2)), Number(wy.toFixed(2))];
+        if (typeof this.onWaypointsChange === "function") {
+          this.onWaypointsChange(this.waypoints);
+        }
+        this.render();
+        return;
+      }
+
+      if (this.waypointMode) {
+        const prevHover = this.hoveredWaypointIndex;
+        this.hoveredWaypointIndex = this._findWaypointAt(wx, wy);
+        this.canvas.style.cursor = this.hoveredWaypointIndex >= 0 ? "pointer" : "crosshair";
+        if (prevHover !== this.hoveredWaypointIndex) {
+          this.render();
+        }
+      }
 
       if (this.measureMode) {
         const snap = this._findSnapPoint(this.hoverWorld[0], this.hoverWorld[1]);
@@ -148,7 +317,6 @@ export class Viewer2D {
       }
 
       if (this.draggedObstacle) {
-        const [wx, wy] = this.hoverWorld;
         this.draggedObstacle.x = Number(wx.toFixed(2));
         this.draggedObstacle.y = Number(wy.toFixed(2));
         if (typeof this.onObstacleMoved === "function") {
@@ -167,10 +335,28 @@ export class Viewer2D {
       this.render();
     });
 
-    window.addEventListener("mouseup", () => {
+    const onPointerEnd = (e) => {
+      if (this._capturedPointerId !== null && this._capturedPointerId !== undefined) {
+        try {
+          this.canvas.releasePointerCapture(this._capturedPointerId);
+        } catch (_) {}
+        this._capturedPointerId = null;
+      }
+      if (this.draggedWaypointIndex >= 0) {
+        this.draggedWaypointIndex = -1;
+        if (typeof this.onWaypointDragEnd === "function") {
+          this.onWaypointDragEnd(this.waypoints);
+        }
+      }
+      if (this.draggedObstacle && typeof this.onObstacleDragEnd === "function") {
+        this.onObstacleDragEnd(this.draggedObstacle);
+      }
       this.isDragging = false;
       this.draggedObstacle = null;
-    });
+    };
+
+    window.addEventListener("pointerup", onPointerEnd);
+    window.addEventListener("pointercancel", onPointerEnd);
   }
 
   resize() {
@@ -199,6 +385,86 @@ export class Viewer2D {
     const wx = this.camX + (sx - this.width / 2) / this.scale;
     const wy = this.camY - (sy - this.height / 2) / this.scale;
     return [wx, wy];
+  }
+
+  toggleWaypointMode(active) {
+    this.waypointMode = typeof active === "boolean" ? active : !this.waypointMode;
+    if (this.waypointMode && this.measureMode) {
+      this.toggleMeasureMode(false);
+    }
+    this.canvas.style.cursor = this.waypointMode ? "crosshair" : "default";
+    if (typeof this.onWaypointModeChange === "function") {
+      this.onWaypointModeChange(this.waypointMode);
+    }
+    this.render();
+    return this.waypointMode;
+  }
+
+  setTrajectoryMode(mode) {
+    this.trajectoryMode = mode === "fillet" ? "fillet" : "spline";
+    this.render();
+  }
+
+  setMinVehicleTurnRadius(r) {
+    if (Number.isFinite(r) && r > 0) {
+      this.minVehicleTurnRadius = r;
+      this.render();
+    }
+  }
+
+  setWaypoints(pts) {
+    this.waypoints = Array.isArray(pts)
+      ? pts
+          .map((p) => {
+            const px = Array.isArray(p) ? p[0] : (p?.x !== undefined ? p.x : p?.[0]);
+            const py = Array.isArray(p) ? p[1] : (p?.y !== undefined ? p.y : p?.[1]);
+            return [Number(px), Number(py)];
+          })
+          .filter((p) => Number.isFinite(p[0]) && Number.isFinite(p[1]))
+      : [];
+    this.render();
+  }
+
+  clearWaypoints(silent = false) {
+    this.waypoints = [];
+    this.draggedWaypointIndex = -1;
+    this.hoveredWaypointIndex = -1;
+    if (!silent && typeof this.onWaypointsChange === "function") {
+      this.onWaypointsChange(this.waypoints);
+    }
+    this.render();
+  }
+
+  _findWaypointAt(wx, wy, tolPx = 14) {
+    if (!this.waypoints || this.waypoints.length === 0) return -1;
+    const tolM = tolPx / this.scale;
+    for (let i = 0; i < this.waypoints.length; i++) {
+      const wp = this.waypoints[i];
+      if (Math.hypot(wp[0] - wx, wp[1] - wy) <= tolM) {
+        return i;
+      }
+    }
+    return -1;
+  }
+
+  _findWaypointSegmentAt(wx, wy, tolPx = 12) {
+    if (!this.waypoints || this.waypoints.length < 2) return -1;
+    const tolM = tolPx / this.scale;
+    for (let i = 0; i < this.waypoints.length - 1; i++) {
+      const p1 = this.waypoints[i];
+      const p2 = this.waypoints[i + 1];
+      const dx = p2[0] - p1[0];
+      const dy = p2[1] - p1[1];
+      const l2 = dx * dx + dy * dy;
+      if (l2 === 0) continue;
+      let t = ((wx - p1[0]) * dx + (wy - p1[1]) * dy) / l2;
+      t = Math.max(0, Math.min(1, t));
+      const dist = Math.hypot(wx - (p1[0] + t * dx), wy - (p1[1] + t * dy));
+      if (dist <= tolM) {
+        return i;
+      }
+    }
+    return -1;
   }
 
   toggleMeasureMode(active) {
@@ -302,23 +568,27 @@ export class Viewer2D {
   }
 
   fitToScene() {
-    if (!this.simResult || !this.simResult.states || this.simResult.states.length === 0) return;
     let minX = +Infinity;
     let minY = +Infinity;
     let maxX = -Infinity;
     let maxY = -Infinity;
 
     const addPt = (x, y) => {
+      if (!Number.isFinite(x) || !Number.isFinite(y)) return;
       if (x < minX) minX = x;
       if (y < minY) minY = y;
       if (x > maxX) maxX = x;
       if (y > maxY) maxY = y;
     };
 
-    for (const s of this.simResult.states) {
-      for (const p of s.tractorPolygon) addPt(p[0], p[1]);
-      if (s.trailerPolygon) {
-        for (const p of s.trailerPolygon) addPt(p[0], p[1]);
+    if (this.simResult && this.simResult.states && this.simResult.states.length > 0) {
+      for (const s of this.simResult.states) {
+        if (s.tractorPolygon) {
+          for (const p of s.tractorPolygon) addPt(p[0], p[1]);
+        }
+        if (s.trailerPolygon) {
+          for (const p of s.trailerPolygon) addPt(p[0], p[1]);
+        }
       }
     }
     for (const obs of this.obstacles || []) {
@@ -328,13 +598,23 @@ export class Viewer2D {
     for (const ent of this.cadBackgroundEntities || []) {
       for (const p of ent.vertices || []) addPt(p[0], p[1]);
     }
+    for (const wp of this.waypoints || []) {
+      addPt(wp[0], wp[1]);
+    }
 
-    if (!Number.isFinite(minX)) return;
+    if (!Number.isFinite(minX)) {
+      this.camX = 0;
+      this.camY = 0;
+      this.scale = 20.0;
+      this.render();
+      return;
+    }
+
     this.camX = 0.5 * (minX + maxX);
     this.camY = 0.5 * (minY + maxY);
     const spanX = Math.max(12, maxX - minX + 8);
     const spanY = Math.max(12, maxY - minY + 8);
-    this.scale = Math.max(4, Math.min(80, Math.min((this.width || 800) / spanX, (this.height || 600) / spanY)));
+    this.scale = Math.max(0.02, Math.min(80, Math.min((this.width || 800) / spanX, (this.height || 600) / spanY)));
     this.render();
   }
 
@@ -352,6 +632,44 @@ export class Viewer2D {
     this.render();
   }
 
+  setPnoaConfig(cfg) {
+    if (!cfg || typeof cfg !== "object") return;
+    if (typeof cfg.enabled === "boolean") {
+      this.pnoaConfig.enabled = cfg.enabled;
+      this.layers.pnoa = cfg.enabled;
+    }
+    if (typeof cfg.opacity === "number" && !isNaN(cfg.opacity)) {
+      this.pnoaConfig.opacity = Math.max(0.1, Math.min(1.0, cfg.opacity));
+    }
+    if (typeof cfg.centerLat === "number" && Number.isFinite(cfg.centerLat)) {
+      this.pnoaConfig.centerLat = cfg.centerLat;
+    }
+    if (typeof cfg.centerLon === "number" && Number.isFinite(cfg.centerLon)) {
+      this.pnoaConfig.centerLon = cfg.centerLon;
+    }
+    if (typeof cfg.utmZone === "number" && Number.isFinite(cfg.utmZone)) {
+      this.pnoaConfig.utmZone = cfg.utmZone;
+    }
+    if (typeof cfg.anchorWorldX === "number" && Number.isFinite(cfg.anchorWorldX)) {
+      this.pnoaConfig.anchorWorldX = cfg.anchorWorldX;
+    }
+    if (typeof cfg.anchorWorldY === "number" && Number.isFinite(cfg.anchorWorldY)) {
+      this.pnoaConfig.anchorWorldY = cfg.anchorWorldY;
+    }
+    this.render();
+  }
+
+  setPnoaLocationFromUtm(easting, northing, zone = 30) {
+    const geo = utmToLatLon(easting, northing, zone);
+    this.setPnoaConfig({
+      centerLat: geo.lat,
+      centerLon: geo.lon,
+      utmZone: zone,
+      anchorWorldX: Number(easting),
+      anchorWorldY: Number(northing)
+    });
+  }
+
   setFrameIndex(stateIdx) {
     if (!this.simResult || !this.simResult.states.length) return;
     this.currentStateIndex = Math.max(0, Math.min(this.simResult.states.length - 1, Math.floor(stateIdx)));
@@ -367,56 +685,102 @@ export class Viewer2D {
     ctx.fillStyle = "#0b1120";
     ctx.fillRect(0, 0, w, h);
 
+    // Ortofotografía aérea oficial PNOA (Instituto Geográfico Nacional - IGN)
+    if (this.layers.pnoa && this.pnoaConfig && this.pnoaConfig.enabled) {
+      this._drawPnoaLayer(ctx, w, h);
+    }
+
     if (this.layers.grid) {
       this._drawGrid(ctx, w, h);
     }
 
-    // Capa de dibujo de fondo CAD DXF
+    // Capa de dibujo de fondo CAD DXF (siempre visible si está habilitada)
     if (this.layers.cadBackground && this.cadBackgroundEntities && this.cadBackgroundEntities.length > 0) {
       this._drawCadBackground(ctx);
     }
 
-    if (!this.simResult || !this.simResult.states || this.simResult.states.length === 0) {
+    // Obstáculos del entorno (edificios, bordillos, vallas, zonas restringidas)
+    // Se dibujan SIEMPRE para que los obstáculos y el plano CAD sean visibles
+    // antes y durante el trazado o simulación de una maniobra
+    if (this.layers.obstacles && this.obstacles && this.obstacles.length > 0) {
+      this._drawObstacles(ctx);
+    }
+
+    // Puntos de paso y trazado interactivo de ruta (UX-04)
+    this._drawWaypoints(ctx);
+
+    const hasSimulation = Boolean(this.simResult && this.simResult.states && this.simResult.states.length > 0);
+    if (!hasSimulation) {
       if (this.measureMode || this.measurePoints.length > 0) {
         this._drawMeasurement(ctx);
       }
+
+      // Si el visor está completamente limpio (sin simulación, sin CAD y sin obstáculos)
+      const hasContent = (this.cadBackgroundEntities && this.cadBackgroundEntities.length > 0) ||
+                         (this.obstacles && this.obstacles.length > 0) ||
+                         (this.waypoints && this.waypoints.length > 0) ||
+                         (this.layers.pnoa && this.pnoaConfig && this.pnoaConfig.enabled);
+      if (!hasContent) {
+        this._drawEmptyStateNotice(ctx, w, h);
+      }
+
+      this._drawHUD(ctx, w, h);
       return;
     }
 
     // 1. Envolvente de margen de seguridad
-    if (this.layers.margin && this.simResult.marginLeftBoundary && this.simResult.marginRightBoundary) {
-      this._drawSweptCorridor(
-        ctx,
-        this.simResult.states,
-        true,
-        this.simResult.marginLeftBoundary,
-        this.simResult.marginRightBoundary,
-        "rgba(250, 204, 21, 0.09)",
-        "#eab308",
-        [6, 4]
-      );
+    if (this.layers.margin) {
+      if (this.simResult.marginEnvelope && this.simResult.marginEnvelope.length >= 3) {
+        this._drawSweptEnvelope(
+          ctx,
+          this.simResult.marginEnvelope,
+          this.simResult.marginEnvelopeHoles,
+          "rgba(250, 204, 21, 0.09)",
+          "#eab308",
+          1.8,
+          [6, 4]
+        );
+      } else if (this.simResult.marginLeftBoundary && this.simResult.marginRightBoundary) {
+        this._drawSweptCorridor(
+          ctx,
+          this.simResult.states,
+          true,
+          this.simResult.marginLeftBoundary,
+          this.simResult.marginRightBoundary,
+          "rgba(250, 204, 21, 0.09)",
+          "#eab308",
+          [6, 4]
+        );
+      }
     }
 
     // 2. Envolvente física de barrido (Hüllkurve)
     if (this.layers.envelope) {
-      this._drawSweptCorridor(
-        ctx,
-        this.simResult.states,
-        false,
-        this.simResult.leftBoundary,
-        this.simResult.rightBoundary,
-        "rgba(239, 68, 68, 0.18)",
-        "#ef4444",
-        []
-      );
+      if (this.simResult.envelope && this.simResult.envelope.length >= 3) {
+        this._drawSweptEnvelope(
+          ctx,
+          this.simResult.envelope,
+          this.simResult.envelopeHoles,
+          "rgba(239, 68, 68, 0.18)",
+          "#ef4444",
+          2.0,
+          []
+        );
+      } else {
+        this._drawSweptCorridor(
+          ctx,
+          this.simResult.states,
+          false,
+          this.simResult.leftBoundary,
+          this.simResult.rightBoundary,
+          "rgba(239, 68, 68, 0.18)",
+          "#ef4444",
+          []
+        );
+      }
     }
 
-    // 3. Obstáculos del entorno
-    if (this.layers.obstacles && this.obstacles) {
-      this._drawObstacles(ctx);
-    }
-
-    // 4. Huellas de las ruedas
+    // 3. Huellas de las ruedas
     if (this.layers.wheelTraces && this.simResult.traces && this.simResult.traces.wheels) {
       const wt = this.simResult.traces.wheels;
       this._drawPolyline(ctx, wt.tractor_front_left, "rgba(148, 163, 184, 0.55)", 1.1, [4, 3]);
@@ -445,10 +809,9 @@ export class Viewer2D {
       this._drawPolyline(ctx, this.simResult.traces.trailer_rear, "#a855f7", 2.0, []);
     }
 
-    // 7. Acotaciones de anchura barrida y vectores de distancia mínima a obstáculos
+    // 7. Acotaciones de anchura barrida (solamente cotas de barrido)
     if (this.layers.dimensions) {
       this._drawDimensions(ctx);
-      this._drawInterferenceVectors(ctx);
     }
 
     // 8. Vehículo articulado en el fotograma actual
@@ -457,11 +820,143 @@ export class Viewer2D {
       this._drawActiveVehicle(ctx, activeState);
     }
 
-    // 9. Medición interactiva de distancias
+    // 9. Puntos de paso y trazado interactivo de ruta (UX-04)
+    this._drawWaypoints(ctx);
+
+    // 10. Medición interactiva de distancias
     this._drawMeasurement(ctx);
 
-    // 10. Escala gráfica, rosa de los vientos y coordenadas
+    // 11. Escala gráfica, rosa de los vientos y coordenadas
     this._drawHUD(ctx, w, h);
+  }
+
+  _drawPnoaLayer(ctx, width, height) {
+    if (!this.layers.pnoa || !this.pnoaConfig || !this.pnoaConfig.enabled) return;
+
+    const lat0 = this.pnoaConfig.centerLat || 40.3872;
+    const lon0 = this.pnoaConfig.centerLon || -3.8785;
+    const radLat0 = (lat0 * Math.PI) / 180;
+    const cosLat0 = Math.cos(radLat0);
+
+    const anchorWx = this.pnoaConfig.anchorWorldX || 0.0;
+    const anchorWy = this.pnoaConfig.anchorWorldY || 0.0;
+
+    // Rango visible en coordenadas del mundo TurnSim (m)
+    const minWx = this.camX - (width / 2) / this.scale;
+    const maxWx = this.camX + (width / 2) / this.scale;
+    const minWy = this.camY - (height / 2) / this.scale;
+    const maxWy = this.camY + (height / 2) / this.scale;
+
+    // Constantes geodésicas Web Mercator EPSG:3857
+    const C = 40075016.68557849;
+    const halfC = C / 2;
+
+    const anchorX3857 = (lon0 * C) / 360;
+    const sinLat0 = Math.sin(radLat0);
+    const clampedSin0 = Math.max(-0.9999, Math.min(0.9999, sinLat0));
+    const anchorY3857 = (Math.log((1 + clampedSin0) / (1 - clampedSin0)) / 2) * (C / (2 * Math.PI));
+
+    // Conversión métrica: 1 m en terreno = 1 / cos(lat0) m en EPSG:3857
+    const to3857X = (wx) => anchorX3857 + ((wx - anchorWx) / cosLat0);
+    const to3857Y = (wy) => anchorY3857 + ((wy - anchorWy) / cosLat0);
+
+    const minX3857 = to3857X(minWx);
+    const maxX3857 = to3857X(maxWx);
+    const minY3857 = to3857Y(minWy);
+    const maxY3857 = to3857Y(maxWy);
+
+    // Nivel de zoom WMTS (PNOA IGN soporta niveles 4 a 20 en GoogleMapsCompatible)
+    const targetZ = Math.round(Math.log2((C * cosLat0 * this.scale) / 256));
+    const z = Math.max(4, Math.min(20, targetZ));
+
+    const numTiles = 1 << z;
+    const tileRes3857 = C / numTiles;
+
+    let colMin = Math.max(0, Math.min(numTiles - 1, Math.floor((minX3857 + halfC) / tileRes3857)));
+    let colMax = Math.max(0, Math.min(numTiles - 1, Math.floor((maxX3857 + halfC) / tileRes3857)));
+    let rowMin = Math.max(0, Math.min(numTiles - 1, Math.floor((halfC - maxY3857) / tileRes3857)));
+    let rowMax = Math.max(0, Math.min(numTiles - 1, Math.floor((halfC - minY3857) / tileRes3857)));
+
+    // Salvaguarda adaptativa: si la vista es ultra-amplia, acotar al cuadrante central visible
+    const totalCols = colMax - colMin + 1;
+    const totalRows = rowMax - rowMin + 1;
+    if (totalCols * totalRows > 120) {
+      const midCol = Math.floor((colMin + colMax) / 2);
+      const midRow = Math.floor((rowMin + rowMax) / 2);
+      colMin = Math.max(0, midCol - 5);
+      colMax = Math.min(numTiles - 1, midCol + 5);
+      rowMin = Math.max(0, midRow - 4);
+      rowMax = Math.min(numTiles - 1, midRow + 4);
+    }
+
+    ctx.save();
+    ctx.globalAlpha = Math.max(0.1, Math.min(1.0, this.pnoaConfig.opacity ?? 0.8));
+
+    for (let col = colMin; col <= colMax; col++) {
+      for (let row = rowMin; row <= rowMax; row++) {
+        if (col < 0 || col >= numTiles || row < 0 || row >= numTiles) continue;
+
+        const tileMinX3857 = col * tileRes3857 - halfC;
+        const tileMaxX3857 = (col + 1) * tileRes3857 - halfC;
+        const tileMaxY3857 = halfC - row * tileRes3857;
+        const tileMinY3857 = halfC - (row + 1) * tileRes3857;
+
+        const tileMinWx = anchorWx + (tileMinX3857 - anchorX3857) * cosLat0;
+        const tileMaxWx = anchorWx + (tileMaxX3857 - anchorX3857) * cosLat0;
+        const tileMinWy = anchorWy + (tileMinY3857 - anchorY3857) * cosLat0;
+        const tileMaxWy = anchorWy + (tileMaxY3857 - anchorY3857) * cosLat0;
+
+        const [screenX1, screenY1] = this.worldToScreen(tileMinWx, tileMaxWy);
+        const [screenX2, screenY2] = this.worldToScreen(tileMaxWx, tileMinWy);
+
+        const sw = screenX2 - screenX1;
+        const sh = screenY2 - screenY1;
+
+        const tileKey = `${z}/${col}/${row}`;
+        let img = this.pnoaTileCache.get(tileKey);
+
+        if (!img) {
+          if (this.pnoaTileCache.size > 512) {
+            const firstKey = this.pnoaTileCache.keys().next().value;
+            this.pnoaTileCache.delete(firstKey);
+          }
+
+          img = new Image();
+          img.crossOrigin = "anonymous";
+          img.loaded = false;
+          img.onload = () => {
+            img.loaded = true;
+            this.render();
+          };
+          img.onerror = () => {
+            img.failed = true;
+          };
+          img.src = `https://www.ign.es/wmts/pnoa-ma?request=GetTile&service=WMTS&version=1.0.0&layer=OI.OrthoimageCoverage&style=default&format=image/jpeg&TileMatrixSet=GoogleMapsCompatible&TileMatrix=${z}&TileRow=${row}&TileCol=${col}`;
+          this.pnoaTileCache.set(tileKey, img);
+        }
+
+        if (img.loaded) {
+          ctx.drawImage(img, screenX1, screenY1, sw, sh);
+        } else {
+          ctx.fillStyle = "rgba(30, 41, 59, 0.4)";
+          ctx.fillRect(screenX1, screenY1, sw, sh);
+        }
+      }
+    }
+
+    ctx.restore();
+
+    // Diligencia de atribución oficial requerida por IGN / CNIG
+    ctx.save();
+    ctx.fillStyle = "rgba(15, 23, 42, 0.82)";
+    ctx.fillRect(8, height - 26, 224, 20);
+    ctx.strokeStyle = "rgba(51, 65, 85, 0.8)";
+    ctx.strokeRect(8, height - 26, 224, 20);
+    ctx.font = "10.5px sans-serif";
+    ctx.fillStyle = "#38bdf8";
+    ctx.textAlign = "left";
+    ctx.fillText("🛰️ IGN España — Ortofoto PNOA", 14, height - 12);
+    ctx.restore();
   }
 
   _drawGrid(ctx, w, h) {
@@ -486,18 +981,26 @@ export class Viewer2D {
       ctx.stroke();
     }
 
-    // Cuadrícula principal (5 m)
+    // Cuadrícula principal adaptativa según nivel de zoom
+    let gridStep = 5;
+    if (this.scale < 0.02) gridStep = 5000;
+    else if (this.scale < 0.1) gridStep = 1000;
+    else if (this.scale < 0.5) gridStep = 200;
+    else if (this.scale < 1.5) gridStep = 50;
+    else if (this.scale < 4.0) gridStep = 20;
+    else gridStep = 5;
+
     ctx.strokeStyle = "rgba(51, 65, 85, 0.85)";
     ctx.lineWidth = 1.2;
     ctx.beginPath();
-    const startX5 = Math.floor(minWX / 5) * 5;
-    const startY5 = Math.floor(minWY / 5) * 5;
-    for (let x = startX5; x <= maxWX; x += 5) {
+    const startXGrid = Math.floor(minWX / gridStep) * gridStep;
+    const startYGrid = Math.floor(minWY / gridStep) * gridStep;
+    for (let x = startXGrid; x <= maxWX; x += gridStep) {
       const [sx] = this.worldToScreen(x, 0);
       ctx.moveTo(sx, 0);
       ctx.lineTo(sx, h);
     }
-    for (let y = startY5; y <= maxWY; y += 5) {
+    for (let y = startYGrid; y <= maxWY; y += gridStep) {
       const [, sy] = this.worldToScreen(0, y);
       ctx.moveTo(0, sy);
       ctx.lineTo(w, sy);
@@ -516,16 +1019,63 @@ export class Viewer2D {
     ctx.stroke();
   }
 
+  _drawSweptEnvelope(ctx, envelopePolygon, envelopeHoles, fillColor, strokeColor, lineWidth = 2.0, dash = []) {
+    if (!envelopePolygon || envelopePolygon.length < 3) return;
+    ctx.save();
+    ctx.beginPath();
+    const [sx0, sy0] = this.worldToScreen(envelopePolygon[0][0], envelopePolygon[0][1]);
+    ctx.moveTo(sx0, sy0);
+    for (let i = 1; i < envelopePolygon.length; i++) {
+      const [sx, sy] = this.worldToScreen(envelopePolygon[i][0], envelopePolygon[i][1]);
+      ctx.lineTo(sx, sy);
+    }
+    ctx.closePath();
+
+    if (envelopeHoles && envelopeHoles.length > 0) {
+      for (const hole of envelopeHoles) {
+        if (!hole || hole.length < 3) continue;
+        const [hx0, hy0] = this.worldToScreen(hole[0][0], hole[0][1]);
+        ctx.moveTo(hx0, hy0);
+        for (let j = 1; j < hole.length; j++) {
+          const [hx, hy] = this.worldToScreen(hole[j][0], hole[j][1]);
+          ctx.lineTo(hx, hy);
+        }
+        ctx.closePath();
+      }
+    }
+
+    ctx.fillStyle = fillColor;
+    ctx.fill("evenodd");
+
+    if (dash && dash.length) {
+      ctx.setLineDash(dash);
+    } else {
+      ctx.setLineDash([]);
+    }
+    ctx.strokeStyle = strokeColor;
+    ctx.lineWidth = lineWidth;
+    ctx.stroke();
+    ctx.restore();
+  }
+
   _drawSweptCorridor(ctx, states, useMargin, leftPts, rightPts, fillColor, strokeColor, dash) {
     ctx.save();
-    ctx.fillStyle = fillColor;
-    const step = Math.max(1, Math.floor(states.length / 180));
-    for (let i = 0; i < states.length; i += step) {
-      const s = states[i];
-      const tp = useMargin ? s.tractorMarginPolygon : s.tractorPolygon;
-      const trp = useMargin ? s.trailerMarginPolygon : s.trailerPolygon;
-      this._drawPolygon(ctx, tp, fillColor, null, 0, []);
-      if (trp) this._drawPolygon(ctx, trp, fillColor, null, 0, []);
+    const corridorFill = useMargin ? "rgba(234, 179, 8, 0.12)" : "rgba(239, 68, 68, 0.18)";
+    if (leftPts && rightPts && leftPts.length >= 2 && rightPts.length >= 2) {
+      ctx.beginPath();
+      const [sx0, sy0] = this.worldToScreen(leftPts[0][0], leftPts[0][1]);
+      ctx.moveTo(sx0, sy0);
+      for (let i = 1; i < leftPts.length; i++) {
+        const [sx, sy] = this.worldToScreen(leftPts[i][0], leftPts[i][1]);
+        ctx.lineTo(sx, sy);
+      }
+      for (let i = rightPts.length - 1; i >= 0; i--) {
+        const [sx, sy] = this.worldToScreen(rightPts[i][0], rightPts[i][1]);
+        ctx.lineTo(sx, sy);
+      }
+      ctx.closePath();
+      ctx.fillStyle = corridorFill;
+      ctx.fill();
     }
 
     const first = states[0];
@@ -533,7 +1083,7 @@ export class Viewer2D {
     this._drawPolygon(
       ctx,
       useMargin ? first.tractorMarginPolygon : first.tractorPolygon,
-      null,
+      corridorFill,
       strokeColor,
       1.3,
       dash
@@ -542,7 +1092,7 @@ export class Viewer2D {
       this._drawPolygon(
         ctx,
         useMargin ? first.trailerMarginPolygon : first.trailerPolygon,
-        null,
+        corridorFill,
         strokeColor,
         1.3,
         dash
@@ -551,7 +1101,7 @@ export class Viewer2D {
     this._drawPolygon(
       ctx,
       useMargin ? last.tractorMarginPolygon : last.tractorPolygon,
-      null,
+      corridorFill,
       strokeColor,
       1.3,
       dash
@@ -560,7 +1110,7 @@ export class Viewer2D {
       this._drawPolygon(
         ctx,
         useMargin ? last.trailerMarginPolygon : last.trailerPolygon,
-        null,
+        corridorFill,
         strokeColor,
         1.3,
         dash
@@ -572,16 +1122,72 @@ export class Viewer2D {
     ctx.restore();
   }
 
-  _drawCadBackground(ctx) {
-    if (!this.cadBackgroundEntities) return;
+  _drawEmptyStateNotice(ctx, w, h) {
     ctx.save();
-    ctx.strokeStyle = "rgba(148, 163, 184, 0.40)";
-    ctx.lineWidth = 1.0;
+    ctx.textAlign = "center";
+    ctx.textBaseline = "middle";
+
+    const cx = w / 2;
+    const cy = h / 2;
+
+    if (this.isComputing) {
+      ctx.fillStyle = "rgba(15, 23, 42, 0.90)";
+      ctx.strokeStyle = "#0284c7";
+      ctx.lineWidth = 1.5;
+      const boxW = Math.min(460, w - 40);
+      const boxH = 96;
+      ctx.beginPath();
+      ctx.roundRect(cx - boxW / 2, cy - boxH / 2, boxW, boxH, 8);
+      ctx.fill();
+      ctx.stroke();
+
+      ctx.font = "bold 13.5px 'Segoe UI', system-ui, sans-serif";
+      ctx.fillStyle = "#38bdf8";
+      ctx.fillText("⏳ Calculando trayectoria y envolventes de barrido...", cx, cy - 14);
+
+      ctx.font = "400 11.5px 'Segoe UI', system-ui, sans-serif";
+      ctx.fillStyle = "#94a3b8";
+      ctx.fillText("Integrando cinemática RK4 y discretización geométrica...", cx, cy + 14);
+      ctx.restore();
+      return;
+    }
+
+    // Caja técnica de indicación inicial en visor vacío
+    ctx.fillStyle = "rgba(15, 23, 42, 0.88)";
+    ctx.strokeStyle = "rgba(56, 189, 248, 0.40)";
+    ctx.lineWidth = 1.2;
+    const boxW = Math.min(500, w - 40);
+    const boxH = 120;
+    ctx.beginPath();
+    ctx.roundRect(cx - boxW / 2, cy - boxH / 2, boxW, boxH, 10);
+    ctx.fill();
+    ctx.stroke();
+
+    ctx.font = "bold 13.5px 'Segoe UI', system-ui, sans-serif";
+    ctx.fillStyle = "#38bdf8";
+    ctx.fillText("Simulador de trayectorias de barrido TurnSim", cx, cy - 32);
+
+    ctx.font = "600 12px 'Segoe UI', system-ui, sans-serif";
+    ctx.fillStyle = "#f8fafc";
+    ctx.fillText("Para comenzar una simulación:", cx, cy - 8);
+
+    ctx.font = "400 11.5px 'Segoe UI', system-ui, sans-serif";
+    ctx.fillStyle = "#94a3b8";
+    ctx.fillText("✏️ Pulse «Trazar ruta» para dibujar una trayectoria sobre el plano", cx, cy + 14);
+    ctx.fillText("📂 O cargue un plano CAD (.DXF) o cartografía geoespacial (.GeoJSON)", cx, cy + 34);
+
+    ctx.restore();
+  }
+
+  _drawCadBackground(ctx) {
+    if (!this.cadBackgroundEntities || this.cadBackgroundEntities.length === 0) return;
+    ctx.save();
     for (const ent of this.cadBackgroundEntities) {
+      if (!ent.vertices || ent.vertices.length < 2) continue;
       if (ent.closed) {
-        this._drawPolygon(ctx, ent.vertices, "rgba(30, 41, 59, 0.25)", "rgba(148, 163, 184, 0.45)", 1.0, []);
+        this._drawPolygon(ctx, ent.vertices, "rgba(30, 41, 59, 0.35)", "rgba(148, 163, 184, 0.75)", 1.2, []);
       } else {
-        this._drawPolyline(ctx, ent.vertices, "rgba(148, 163, 184, 0.40)", 1.0, []);
+        this._drawPolyline(ctx, ent.vertices, "rgba(148, 163, 184, 0.70)", 1.2, []);
       }
     }
     ctx.restore();
@@ -602,26 +1208,6 @@ export class Viewer2D {
           : "rgba(239, 68, 68, 0.22)";
         const dash = obs.type === "restricted_zone" ? [6, 4] : [];
         this._drawPolygon(ctx, verts, fill, color, 2.2, dash);
-      }
-
-      if (verts.length > 0) {
-        let cx = 0;
-        let cy = 0;
-        for (const [vx, vy] of verts) {
-          cx += vx;
-          cy += vy;
-        }
-        cx /= verts.length;
-        cy /= verts.length;
-        const [sx, sy] = this.worldToScreen(cx, cy);
-        ctx.save();
-        ctx.font = "600 11px 'Segoe UI', system-ui, sans-serif";
-        ctx.fillStyle = "#f8fafc";
-        ctx.textAlign = "center";
-        ctx.shadowColor = "rgba(0,0,0,0.9)";
-        ctx.shadowBlur = 4;
-        ctx.fillText(obs.name, sx, sy);
-        ctx.restore();
       }
     }
   }
@@ -968,6 +1554,139 @@ export class Viewer2D {
     ctx.fillStyle = "#94a3b8";
     ctx.font = "10px monospace";
     ctx.fillText(subText, mx, my + 8);
+
+    ctx.restore();
+  }
+
+  _drawWaypoints(ctx) {
+    if (!this.waypoints || this.waypoints.length === 0) return;
+
+    ctx.save();
+    let hasSharpCurvature = false;
+    let minObservedR = Infinity;
+
+    // 1. Línea directriz entre waypoints (Spline CAD continua o Polilínea clásica)
+    if (this.waypoints.length >= 2) {
+      if (this.trajectoryMode === "spline" && this.waypoints.length >= 3) {
+        // Polígono de control CAD (líneas tenues discontinuas)
+        ctx.strokeStyle = "rgba(148, 163, 184, 0.35)";
+        ctx.lineWidth = 1.0;
+        ctx.setLineDash([4, 4]);
+        ctx.beginPath();
+        for (let i = 0; i < this.waypoints.length; i++) {
+          const [sx, sy] = this.worldToScreen(this.waypoints[i][0], this.waypoints[i][1]);
+          if (i === 0) ctx.moveTo(sx, sy);
+          else ctx.lineTo(sx, sy);
+        }
+        ctx.stroke();
+        ctx.setLineDash([]);
+
+        // Traza Spline Catmull-Rom continua con evaluación de radio admisible
+        const splineSamples = sampleCatmullRomSpline(this.waypoints, { stepM: 0.20 });
+        const minTurnR = this.minVehicleTurnRadius || 6.8;
+
+        for (let i = 0; i < splineSamples.length - 1; i++) {
+          const s0 = splineSamples[i];
+          const s1 = splineSamples[i + 1];
+          if (s0.radius < minObservedR) minObservedR = s0.radius;
+          const isSharp = s0.radius < minTurnR || s1.radius < minTurnR;
+          if (isSharp) hasSharpCurvature = true;
+
+          const [sx0, sy0] = this.worldToScreen(s0.x, s0.y);
+          const [sx1, sy1] = this.worldToScreen(s1.x, s1.y);
+
+          ctx.strokeStyle = isSharp ? "#f87171" : (this.waypointMode ? "#38bdf8" : "rgba(56, 189, 248, 0.70)");
+          ctx.lineWidth = isSharp ? 2.8 : (this.waypointMode ? 2.4 : 1.8);
+          ctx.beginPath();
+          ctx.moveTo(sx0, sy0);
+          ctx.lineTo(sx1, sy1);
+          ctx.stroke();
+        }
+      } else {
+        // Modo tradicional polilínea con acuerdos
+        ctx.strokeStyle = this.waypointMode ? "#38bdf8" : "rgba(56, 189, 248, 0.45)";
+        ctx.lineWidth = this.waypointMode ? 2.2 : 1.5;
+        ctx.setLineDash([6, 4]);
+        ctx.beginPath();
+        for (let i = 0; i < this.waypoints.length; i++) {
+          const [sx, sy] = this.worldToScreen(this.waypoints[i][0], this.waypoints[i][1]);
+          if (i === 0) ctx.moveTo(sx, sy);
+          else ctx.lineTo(sx, sy);
+        }
+        ctx.stroke();
+        ctx.setLineDash([]);
+      }
+    }
+
+    // 2. Nodos circulares
+    for (let i = 0; i < this.waypoints.length; i++) {
+      const wp = this.waypoints[i];
+      const [sx, sy] = this.worldToScreen(wp[0], wp[1]);
+      const isDragged = this.draggedWaypointIndex === i;
+      const isHovered = this.hoveredWaypointIndex === i;
+      const r = isDragged ? 11 : isHovered ? 10 : 8.5;
+
+      // Halo resaltado si está interactivo
+      if (isDragged || isHovered) {
+        ctx.fillStyle = isDragged ? "rgba(245, 158, 11, 0.35)" : "rgba(56, 189, 248, 0.35)";
+        ctx.beginPath();
+        ctx.arc(sx, sy, r + 4, 0, Math.PI * 2);
+        ctx.fill();
+      }
+
+      // Círculo del nodo
+      ctx.fillStyle = isDragged ? "#f59e0b" : isHovered ? "#0284c7" : "#0369a1";
+      ctx.strokeStyle = "#f8fafc";
+      ctx.lineWidth = 2.0;
+      ctx.beginPath();
+      ctx.arc(sx, sy, r, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.stroke();
+
+      // Número de waypoint
+      ctx.fillStyle = "#ffffff";
+      ctx.font = "bold 10px 'Segoe UI', system-ui, sans-serif";
+      ctx.textAlign = "center";
+      ctx.textBaseline = "middle";
+      ctx.fillText(String(i + 1), sx, sy);
+
+      // Etiqueta métrica flotante únicamente durante arrastre interactivo (modo limpio)
+      if (this.waypointMode && isDragged) {
+        const coordText = `P${i + 1} (${wp[0].toFixed(2)}, ${wp[1].toFixed(2)})`;
+        ctx.font = "10px monospace";
+        const tw = ctx.measureText(coordText).width + 8;
+        ctx.fillStyle = "rgba(15, 23, 42, 0.90)";
+        ctx.strokeStyle = "#f59e0b";
+        ctx.lineWidth = 1;
+        ctx.fillRect(sx - tw / 2, sy - r - 18, tw, 14);
+        ctx.strokeRect(sx - tw / 2, sy - r - 18, tw, 14);
+        ctx.fillStyle = "#f8fafc";
+        ctx.fillText(coordText, sx, sy - r - 11);
+      }
+    }
+
+    // 3. Banner informativo en modo edición (situado en la parte inferior para despejar por completo la botonera superior)
+    if (this.waypointMode) {
+      const modeLabel = this.trajectoryMode === "spline" ? "SPLINE CAD CONTINUO" : "POLILÍNEA CAD";
+      const sharpWarning = hasSharpCurvature ? ` · ⚠️ Radio cerrado (${minObservedR.toFixed(1)} m)` : "";
+      const bannerText = `✏️ MODO TRAZADO [${modeLabel}]: Clic para añadir · Arrastrar para ajustar${sharpWarning} · Clic dcho. para borrar`;
+      ctx.font = "600 11px 'Segoe UI', system-ui, sans-serif";
+      const bw = ctx.measureText(bannerText).width + 24;
+      const bx = (this.width - bw) / 2;
+      const by = Math.max(16, this.height - 42);
+      ctx.fillStyle = "rgba(15, 23, 42, 0.92)";
+      ctx.strokeStyle = hasSharpCurvature ? "#f87171" : "#0284c7";
+      ctx.lineWidth = 1.5;
+      ctx.beginPath();
+      ctx.roundRect(bx, by, bw, 28, 6);
+      ctx.fill();
+      ctx.stroke();
+
+      ctx.fillStyle = hasSharpCurvature ? "#fca5a5" : "#38bdf8";
+      ctx.textAlign = "center";
+      ctx.textBaseline = "middle";
+      ctx.fillText(bannerText, this.width / 2, by + 14);
+    }
 
     ctx.restore();
   }

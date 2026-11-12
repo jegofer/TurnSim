@@ -1,0 +1,8 @@
+User-agent: *
+Allow: /
+Disallow: /tests/
+Disallow: /scripts/
+Disallow: /TurnSim_CAD_Test/
+Disallow: /TurnSim_Audit/
+
+Sitemap: https://ospa-turnsim.github.io/sitemap.xml

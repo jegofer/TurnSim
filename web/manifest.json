@@ -1,0 +1,32 @@
+{
+  "name": "TurnSim — Open Swept Path Analyzer (OSPA)",
+  "short_name": "TurnSim",
+  "description": "Simulador cinemático y geométrico de trayectorias de barrido (Swept Path Analysis) para vehículos pesados articulados y rígidos.",
+  "start_url": "./index.html",
+  "scope": "./",
+  "display": "standalone",
+  "orientation": "any",
+  "background_color": "#080d1a",
+  "theme_color": "#0284c7",
+  "categories": ["engineering", "productivity", "utilities"],
+  "icons": [
+    {
+      "src": "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='12' fill='%230f172a'/%3E%3Cpath d='M12 48 C12 26 26 14 52 14' stroke='%23ef4444' stroke-width='5' fill='none' stroke-dasharray='6 4'/%3E%3Cpath d='M22 52 C22 34 32 24 52 24' stroke='%2338bdf8' stroke-width='4' fill='none'/%3E%3Crect x='34' y='16' width='16' height='9' rx='2' fill='%230284c7'/%3E%3C/svg%3E",
+      "sizes": "64x64",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    },
+    {
+      "src": "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 192 192'%3E%3Crect width='192' height='192' rx='36' fill='%230f172a'/%3E%3Cpath d='M36 144 C36 78 78 42 156 42' stroke='%23ef4444' stroke-width='14' fill='none' stroke-dasharray='16 10'/%3E%3Cpath d='M66 156 C66 102 96 72 156 72' stroke='%2338bdf8' stroke-width='12' fill='none'/%3E%3Crect x='102' y='48' width='48' height='27' rx='6' fill='%230284c7'/%3E%3C/svg%3E",
+      "sizes": "192x192",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    },
+    {
+      "src": "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 512 512'%3E%3Crect width='512' height='512' rx='96' fill='%230f172a'/%3E%3Cpath d='M96 384 C96 208 208 112 416 112' stroke='%23ef4444' stroke-width='38' fill='none' stroke-dasharray='44 28'/%3E%3Cpath d='M176 416 C176 272 256 192 416 192' stroke='%2338bdf8' stroke-width='32' fill='none'/%3E%3Crect x='272' y='128' width='128' height='72' rx='16' fill='%230284c7'/%3E%3C/svg%3E",
+      "sizes": "512x512",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
+  ]
+}

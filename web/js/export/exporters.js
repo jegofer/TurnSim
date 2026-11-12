@@ -6,11 +6,27 @@
 import { computeDerivedVehicleMetrics } from "../models/vehicles.js";
 import { getObstacleVertices } from "../engine/collisions.js";
 
+function escapeHTML(str) {
+  return String(str ?? "")
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
+}
+
 /**
  * Construye un diagrama vectorial SVG en planta a escala métrica exacta para insertar en el informe técnico PDF
  * o descargar como archivo vectorial independiente.
  */
-export function generateSVGDiagram(simResult, interferenceReport, obstacles = [], layerVisibility = {}) {
+export function generateSVGDiagram(
+  simResult,
+  interferenceReport,
+  obstacles = [],
+  layerVisibility = {},
+  cadBackgroundEntities = []
+) {
+  const showCadBackground = layerVisibility.cadBackground !== false;
   const showEnvelope = layerVisibility.envelope !== false;
   const showMargin = layerVisibility.margin !== false;
   const showWheelTraces = layerVisibility.wheelTraces !== false;
@@ -44,6 +60,11 @@ export function generateSVGDiagram(simResult, interferenceReport, obstacles = []
     if (obs.enabled === false) continue;
     for (const pt of getObstacleVertices(obs)) includePt(pt[0], pt[1]);
   }
+  if (showCadBackground && cadBackgroundEntities) {
+    for (const ent of cadBackgroundEntities) {
+      for (const pt of ent.vertices || []) includePt(pt[0], pt[1]);
+    }
+  }
 
   if (!Number.isFinite(minX)) {
     minX = -10;
@@ -66,6 +87,26 @@ export function generateSVGDiagram(simResult, interferenceReport, obstacles = []
   const ty = (y) => (maxY - y).toFixed(3);
 
   const polyToPointsAttr = (pts) => pts.map(([x, y]) => `${tx(x)},${ty(y)}`).join(" ");
+
+  const pathToSvgD = (outer, holes) => {
+    if (!outer || outer.length < 3) return "";
+    let d = `M ${tx(outer[0][0])} ${ty(outer[0][1])}`;
+    for (let i = 1; i < outer.length; i++) {
+      d += ` L ${tx(outer[i][0])} ${ty(outer[i][1])}`;
+    }
+    d += " Z";
+    if (holes && holes.length > 0) {
+      for (const h of holes) {
+        if (!h || h.length < 3) continue;
+        d += ` M ${tx(h[0][0])} ${ty(h[0][1])}`;
+        for (let j = 1; j < h.length; j++) {
+          d += ` L ${tx(h[j][0])} ${ty(h[j][1])}`;
+        }
+        d += " Z";
+      }
+    }
+    return d;
+  };
 
   const lines = [];
   lines.push(
@@ -94,43 +135,74 @@ export function generateSVGDiagram(simResult, interferenceReport, obstacles = []
     );
   }
 
+  // 0. Plano de fondo CAD (referencia territorial / vial)
+  if (showCadBackground && cadBackgroundEntities && cadBackgroundEntities.length > 0) {
+    lines.push(`  <g id="cad-background">`);
+    for (const ent of cadBackgroundEntities) {
+      if (!ent.vertices || ent.vertices.length < 2) continue;
+      if (ent.closed) {
+        lines.push(
+          `    <polygon points="${polyToPointsAttr(ent.vertices)}" fill="#e2e8f0" fill-opacity="0.35" stroke="#94a3b8" stroke-width="0.05" />`
+        );
+      } else {
+        lines.push(
+          `    <polyline points="${polyToPointsAttr(ent.vertices)}" fill="none" stroke="#94a3b8" stroke-width="0.05" stroke-dasharray="0.25 0.15" />`
+        );
+      }
+    }
+    lines.push(`  </g>`);
+  }
+
   // 1. Envolvente de margen de seguridad
-  if (showMargin && simResult.marginLeftBoundary && simResult.marginRightBoundary) {
-    const marginLoop = [
-      ...simResult.marginLeftBoundary,
-      ...[...simResult.marginRightBoundary].reverse()
-    ];
-    if (marginLoop.length >= 3) {
+  if (showMargin) {
+    if (simResult.marginEnvelope && simResult.marginEnvelope.length >= 3) {
+      const marginD = pathToSvgD(simResult.marginEnvelope, simResult.marginEnvelopeHoles);
       lines.push(
-        `  <polygon points="${polyToPointsAttr(marginLoop)}" fill="#fef08a" fill-opacity="0.30" stroke="#eab308" stroke-width="0.07" stroke-dasharray="0.35 0.20" />`
+        `  <path id="safety-margin-envelope" d="${marginD}" fill="#fef08a" fill-opacity="0.30" fill-rule="evenodd" stroke="#eab308" stroke-width="0.07" stroke-dasharray="0.35 0.20" />`
       );
+    } else if (simResult.marginLeftBoundary && simResult.marginRightBoundary) {
+      const marginLoop = [
+        ...simResult.marginLeftBoundary,
+        ...[...simResult.marginRightBoundary].reverse()
+      ];
+      if (marginLoop.length >= 3) {
+        lines.push(
+          `  <polygon points="${polyToPointsAttr(marginLoop)}" fill="#fef08a" fill-opacity="0.30" stroke="#eab308" stroke-width="0.07" stroke-dasharray="0.35 0.20" />`
+        );
+      }
     }
   }
 
   // 2. Envolvente física de barrido
   if (showEnvelope) {
-    // Relleno continuo mediante la unión de las siluetas y bordes laterales
     lines.push(`  <g id="swept-envelope">`);
-    for (let i = 0; i < simResult.states.length; i += 2) {
-      const s = simResult.states[i];
+    if (simResult.envelope && simResult.envelope.length >= 3) {
+      const envD = pathToSvgD(simResult.envelope, simResult.envelopeHoles);
       lines.push(
-        `    <polygon points="${polyToPointsAttr(s.tractorPolygon)}" fill="#fecaca" fill-opacity="0.35" stroke="none" />`
+        `    <path d="${envD}" fill="#fecaca" fill-opacity="0.35" fill-rule="evenodd" stroke="#dc2626" stroke-width="0.11" />`
       );
-      if (s.trailerPolygon) {
+    } else {
+      for (let i = 0; i < simResult.states.length; i += 2) {
+        const s = simResult.states[i];
         lines.push(
-          `    <polygon points="${polyToPointsAttr(s.trailerPolygon)}" fill="#fecaca" fill-opacity="0.35" stroke="none" />`
+          `    <polygon points="${polyToPointsAttr(s.tractorPolygon)}" fill="#fecaca" fill-opacity="0.35" stroke="none" />`
+        );
+        if (s.trailerPolygon) {
+          lines.push(
+            `    <polygon points="${polyToPointsAttr(s.trailerPolygon)}" fill="#fecaca" fill-opacity="0.35" stroke="none" />`
+          );
+        }
+      }
+      if (simResult.leftBoundary && simResult.leftBoundary.length > 1) {
+        lines.push(
+          `    <polyline points="${polyToPointsAttr(simResult.leftBoundary)}" fill="none" stroke="#dc2626" stroke-width="0.11" />`
         );
       }
-    }
-    if (simResult.leftBoundary.length > 1) {
-      lines.push(
-        `    <polyline points="${polyToPointsAttr(simResult.leftBoundary)}" fill="none" stroke="#dc2626" stroke-width="0.11" />`
-      );
-    }
-    if (simResult.rightBoundary.length > 1) {
-      lines.push(
-        `    <polyline points="${polyToPointsAttr(simResult.rightBoundary)}" fill="none" stroke="#dc2626" stroke-width="0.11" />`
-      );
+      if (simResult.rightBoundary && simResult.rightBoundary.length > 1) {
+        lines.push(
+          `    <polyline points="${polyToPointsAttr(simResult.rightBoundary)}" fill="none" stroke="#dc2626" stroke-width="0.11" />`
+        );
+      }
     }
     lines.push(`  </g>`);
   }
@@ -237,26 +309,6 @@ export function generateSVGDiagram(simResult, interferenceReport, obstacles = []
     lines.push(`  </g>`);
   }
 
-  // Puntos de distancia mínima o colisión con obstáculos
-  if (interferenceReport && interferenceReport.obstacleReports) {
-    lines.push(`  <g id="interferences">`);
-    for (const rep of interferenceReport.obstacleReports) {
-      if (!rep.pointOnVehicle || !rep.pointOnObstacle) continue;
-      const [vx, vy] = rep.pointOnVehicle;
-      const [ox, oy] = rep.pointOnObstacle;
-      if (rep.status === "COLLISION" || rep.status === "RESTRICTED_INVASION") {
-        lines.push(
-          `    <circle cx="${tx(vx)}" cy="${ty(vy)}" r="0.45" fill="#dc2626" fill-opacity="0.35" stroke="#dc2626" stroke-width="0.12" />`
-        );
-      } else {
-        lines.push(
-          `    <line x1="${tx(vx)}" y1="${ty(vy)}" x2="${tx(ox)}" y2="${ty(oy)}" stroke="#0284c7" stroke-width="0.07" stroke-dasharray="0.15 0.10" />`
-        );
-      }
-    }
-    lines.push(`  </g>`);
-  }
-
   // 8. Barra de escala gráfica (0 a 5 m) y flecha Norte
   const sbX = minX + 1.8;
   const sbY = minY + 1.4;
@@ -277,25 +329,54 @@ export function generateSVGDiagram(simResult, interferenceReport, obstacles = []
  * Genera el contenido de un archivo CAD DXF (formato ASCII R12/R2000 universalmente compatible
  * con AutoCAD, Civil 3D, FreeCAD, OpenCAD Studio y QGIS) directamente en el navegador.
  */
-export function generateDXFContent(simResult, obstacles = []) {
+export function generateDXFContent(simResult, obstacles = [], cadBackgroundEntities = [], options = {}) {
+  const originOffset = options.originOffset || simResult?.originOffset || simResult?.maneuver?.originOffset || null;
+  const ox = Number(originOffset?.x || 0);
+  const oy = Number(originOffset?.y || 0);
+
   const lines = [];
   const pushEntityPolylines = (pts, layer, closed = false, color = 7) => {
     if (!pts || pts.length < 2) return;
     lines.push("0", "POLYLINE", "8", layer, "62", String(color), "66", "1", "70", closed ? "1" : "0");
     for (const [x, y] of pts) {
-      lines.push("0", "VERTEX", "8", layer, "10", x.toFixed(4), "20", y.toFixed(4), "30", "0.0");
+      lines.push("0", "VERTEX", "8", layer, "10", (x + ox).toFixed(4), "20", (y + oy).toFixed(4), "30", "0.0");
     }
     lines.push("0", "SEQEND");
   };
 
   lines.push("0", "SECTION", "2", "ENTITIES");
 
-  // 1. Bordes de envolvente de barrido
-  pushEntityPolylines(simResult.leftBoundary, "0_BARRIDO_ENVOLVENTE", false, 1);
-  pushEntityPolylines(simResult.rightBoundary, "0_BARRIDO_ENVOLVENTE", false, 1);
+  // 0. Entidades de fondo CAD importadas (conservación para round-trip)
+  if (cadBackgroundEntities && cadBackgroundEntities.length > 0) {
+    for (const ent of cadBackgroundEntities) {
+      if (!ent.vertices || ent.vertices.length < 2) continue;
+      const targetLayer = ent.layer ? `CAD_REF_${ent.layer}` : "CAD_REF_FONDO";
+      pushEntityPolylines(ent.vertices, targetLayer, Boolean(ent.closed), 8);
+    }
+  }
 
-  // 2. Margen de seguridad
-  if (simResult.marginLeftBoundary && simResult.marginRightBoundary) {
+  // 1. Bordes de envolvente de barrido (GEOM-02: Polilínea cerrada exacta sin truncamientos)
+  if (simResult.envelope && simResult.envelope.length >= 3) {
+    pushEntityPolylines(simResult.envelope, "0_BARRIDO_ENVOLVENTE", true, 1);
+    if (simResult.envelopeHoles && simResult.envelopeHoles.length > 0) {
+      for (const hole of simResult.envelopeHoles) {
+        pushEntityPolylines(hole, "0_BARRIDO_ENVOLVENTE", true, 1);
+      }
+    }
+  } else {
+    pushEntityPolylines(simResult.leftBoundary, "0_BARRIDO_ENVOLVENTE", false, 1);
+    pushEntityPolylines(simResult.rightBoundary, "0_BARRIDO_ENVOLVENTE", false, 1);
+  }
+
+  // 2. Margen de seguridad (GEOM-02: Polilínea cerrada con redondeo exacto)
+  if (simResult.marginEnvelope && simResult.marginEnvelope.length >= 3) {
+    pushEntityPolylines(simResult.marginEnvelope, "0_MARGEN_SEGURIDAD", true, 2);
+    if (simResult.marginEnvelopeHoles && simResult.marginEnvelopeHoles.length > 0) {
+      for (const hole of simResult.marginEnvelopeHoles) {
+        pushEntityPolylines(hole, "0_MARGEN_SEGURIDAD", true, 2);
+      }
+    }
+  } else if (simResult.marginLeftBoundary && simResult.marginRightBoundary) {
     pushEntityPolylines(simResult.marginLeftBoundary, "0_MARGEN_SEGURIDAD", false, 2);
     pushEntityPolylines(simResult.marginRightBoundary, "0_MARGEN_SEGURIDAD", false, 2);
   }
@@ -327,8 +408,8 @@ export function generateDXFContent(simResult, obstacles = []) {
   // 6. Acotaciones de anchura barrida
   for (const d of simResult.dimensions || []) {
     pushEntityPolylines([d.p1, d.p2], "0_ACOTACIONES_ANCHURA", false, 2);
-    const mx = 0.5 * (d.p1[0] + d.p2[0]);
-    const my = 0.5 * (d.p1[1] + d.p2[1]);
+    const mx = 0.5 * (d.p1[0] + d.p2[0]) + ox;
+    const my = 0.5 * (d.p1[1] + d.p2[1]) + oy;
     lines.push(
       "0",
       "TEXT",
@@ -354,6 +435,91 @@ export function generateDXFContent(simResult, obstacles = []) {
 }
 
 /**
+ * Evalúa y resume el cumplimiento de las normativas españolas y europeas para el informe técnico (MEJ-04).
+ */
+export function buildNormativeComplianceSummary({ vehicle, maneuver, simResult, interferenceReport }) {
+  const isSpainF = vehicle?.id === "spain_furgon_f";
+  const isSpainC = vehicle?.id === "spain_camion_ligero_c";
+  const isSpainT = vehicle?.id === "spain_camion_articulado_t";
+  const isSpainA = vehicle?.id === "spain_autobus_rigido_a";
+
+  let patternCode = "Vehículo comercial / Ficha de fabricante";
+  let minNormRf = 10.30; // Camión articulado como referencia más estricta
+  let maxPermissibleLength = 16.50; // RD 2822/1998 Anexo IX
+  let maxPermissibleWidth = 2.55;
+
+  if (isSpainF) {
+    patternCode = "Furgón patrón (F) — Norma 3.1-IC Tabla A3.1";
+    minNormRf = 7.50;
+    maxPermissibleLength = 12.00;
+  } else if (isSpainC) {
+    patternCode = "Camión rígido patrón (C) — Norma 3.1-IC Tabla A3.1";
+    minNormRf = 9.10;
+    maxPermissibleLength = 12.00;
+  } else if (isSpainT) {
+    patternCode = "Camión articulado patrón (T) — Norma 3.1-IC Tabla A3.1";
+    minNormRf = 10.30;
+    maxPermissibleLength = 16.50;
+  } else if (isSpainA) {
+    patternCode = "Autobús rígido 3 ejes patrón (A) — Norma 3.1-IC Tabla A3.1";
+    minNormRf = 10.50;
+    maxPermissibleLength = 15.00;
+  } else if (vehicle?.isRigid) {
+    minNormRf = 9.10;
+    maxPermissibleLength = 12.00;
+  }
+
+  // Comprobar radio de dirección en la maniobra respecto al eje director delantero
+  const Lwb = vehicle?.tractor?.wheelbase || 3.90;
+  const isFrontRef = maneuver?.steeringReferencePoint === "front_axle";
+  let minRfObserved = Infinity;
+
+  for (const seg of (maneuver?.segments || [])) {
+    if (seg.type === "arc") {
+      const r = Number(seg.radius);
+      const rf = isFrontRef ? r : Math.sqrt(r * r + Lwb * Lwb);
+      if (rf < minRfObserved) minRfObserved = rf;
+    } else if (seg.type === "spline" && Number.isFinite(seg.minRadius)) {
+      const r = Number(seg.minRadius);
+      const rf = isFrontRef ? r : Math.sqrt(r * r + Lwb * Lwb);
+      if (rf < minRfObserved) minRfObserved = rf;
+    }
+  }
+
+  const hasArcs = Number.isFinite(minRfObserved);
+  const radiusCompliant = !hasArcs || minRfObserved >= minNormRf - 0.05;
+
+  // Comprobar gálibos máximos (RD 2822/1998 Anexo IX)
+  const metrics = computeDerivedVehicleMetrics(vehicle);
+  const totalLength = metrics.totalCoupledLength;
+  const maxWidth = Math.max(vehicle?.tractor?.width || 0, vehicle?.trailer?.width || 0);
+  const lengthCompliant = totalLength <= maxPermissibleLength + 0.05;
+  const widthCompliant = maxWidth <= maxPermissibleWidth + 0.05;
+
+  // Comprobar holguras e interferencias
+  const clearanceStatus = interferenceReport ? interferenceReport.globalStatus : "CLEAR";
+  const clearanceCompliant = clearanceStatus === "CLEAR" || clearanceStatus === "MARGIN_VIOLATION";
+
+  return {
+    patternCode,
+    isStandardSpain: isSpainF || isSpainC || isSpainT || isSpainA,
+    minNormRf,
+    minRfObserved: hasArcs ? minRfObserved : null,
+    hasArcs,
+    radiusCompliant,
+    totalLength,
+    maxPermissibleLength,
+    lengthCompliant,
+    maxWidth,
+    maxPermissibleWidth,
+    widthCompliant,
+    clearanceStatus,
+    clearanceCompliant,
+    globalCompliant: radiusCompliant && lengthCompliant && widthCompliant && clearanceStatus === "CLEAR"
+  };
+}
+
+/**
  * Genera y abre el Informe Técnico Estructurado Imprimible / PDF (Opción 2 del apartado 10).
  */
 export function openStructuredTechnicalReport({
@@ -364,14 +530,22 @@ export function openStructuredTechnicalReport({
   simResult,
   interferenceReport,
   obstacles,
-  layerVisibility
+  layerVisibility,
+  cadBackgroundEntities = []
 }) {
   const nowStr = new Date().toLocaleString("es-ES", {
     dateStyle: "long",
     timeStyle: "short"
   });
   const metrics = computeDerivedVehicleMetrics(vehicle);
-  const svgDiagram = generateSVGDiagram(simResult, interferenceReport, obstacles, layerVisibility);
+  const compliance = buildNormativeComplianceSummary({ vehicle, maneuver, simResult, interferenceReport });
+  const svgDiagram = generateSVGDiagram(
+    simResult,
+    interferenceReport,
+    obstacles,
+    layerVisibility,
+    cadBackgroundEntities
+  );
 
   const segmentsRows = (maneuver.segments || [])
     .map((seg, idx) => {
@@ -383,6 +557,16 @@ export function openStructuredTechnicalReport({
           <td>${dirLabel}</td>
           <td>Longitud L = ${Number(seg.length).toFixed(2)} m</td>
           <td>&kappa; = 0,000 m<sup>-1</sup> (&delta; = 0,0°)</td>
+        </tr>`;
+      } else if (seg.type === "spline") {
+        const nPts = seg.waypoints ? seg.waypoints.length : (seg.samples ? seg.samples.length : 0);
+        const rMinStr = Number.isFinite(seg.minRadius) ? `${seg.minRadius.toFixed(2)} m` : "—";
+        return `<tr>
+          <td>${idx + 1}</td>
+          <td>Spline CAD continua (PCHIP)</td>
+          <td>${dirLabel}</td>
+          <td>Longitud L = ${Number(seg.totalLength || 0).toFixed(2)} m (${nPts} waypoints)</td>
+          <td>R<sub>mín</sub> = ${rMinStr}</td>
         </tr>`;
       } else {
         const turnDir = seg.angle >= 0 ? "Izquierda (+)" : "Derecha (-)";
@@ -402,20 +586,33 @@ export function openStructuredTechnicalReport({
       ? interferenceReport.obstacleReports
           .map(
             (r) => `<tr>
-              <td><strong>${r.name}</strong><br><small>${r.type}</small></td>
-              <td><span class="status-pill status-${r.status}">${r.statusLabel}</span></td>
+              <td><strong>${escapeHTML(r.name)}</strong><br><small>${escapeHTML(r.type)}</small></td>
+              <td><span class="status-pill status-${escapeHTML(r.status)}">${escapeHTML(r.statusLabel)}</span></td>
               <td>${r.minDistanceM !== null ? `${r.minDistanceM.toFixed(3)} m` : "N/E"}</td>
-              <td>PK ${r.distAlongPathM.toFixed(2)} m (${r.part || "—"})</td>
+              <td>PK ${r.distAlongPathM.toFixed(2)} m (${escapeHTML(r.part || "—")})</td>
             </tr>`
           )
           .join("")
       : `<tr><td colspan="4">No se han definido obstáculos activos en este escenario.</td></tr>`;
 
+  const safeProjectName = escapeHTML(projectName);
+  const safeScenarioName = escapeHTML(scenarioName);
+
+  const mdContent = generateMarkdownTechnicalReport({
+    projectName,
+    scenarioName,
+    vehicle,
+    maneuver,
+    simResult,
+    interferenceReport,
+    obstacles
+  });
+
   const reportHtml = `<!DOCTYPE html>
 <html lang="es">
 <head>
   <meta charset="UTF-8">
-  <title>Informe Técnico de Simulación de Barrido - ${projectName}</title>
+  <title>Informe Técnico de Simulación de Barrido - ${safeProjectName}</title>
   <style>
     @page { size: A4 portrait; margin: 14mm; }
     * { box-sizing: border-box; }
@@ -533,6 +730,7 @@ export function openStructuredTechnicalReport({
     <div><strong>Vista previa de Informe Técnico Estructurado (PDF)</strong> — Verifique el documento y pulse «Imprimir / Guardar como PDF».</div>
     <div>
       <button onclick="window.print()">Imprimir / Guardar PDF</button>
+      <button onclick="downloadMdReport()" style="background:#059669;">Descargar Markdown (.md)</button>
       <button onclick="window.close()" style="background:#475569;">Cerrar ventana</button>
     </div>
   </div>
@@ -540,7 +738,7 @@ export function openStructuredTechnicalReport({
   <header>
     <div>
       <h1>INFORME TÉCNICO DE SIMULACIÓN DE TRAYECTORIA DE BARRIDO</h1>
-      <div><strong>Proyecto:</strong> ${projectName} &bull; <strong>Escenario:</strong> ${scenarioName}</div>
+      <div><strong>Proyecto:</strong> ${safeProjectName} &bull; <strong>Escenario:</strong> ${safeScenarioName}</div>
     </div>
     <div style="text-align:right; font-size:11px;">
       <div><strong>Fecha:</strong> ${nowStr}</div>
@@ -634,6 +832,79 @@ export function openStructuredTechnicalReport({
     <tbody>${obstaclesRows}</tbody>
   </table>
 
+  <h2>5. Justificación y dictamen de conformidad normativa (Norma 3.1-IC, Guía de nudos viarios y reglamentación UE)</h2>
+  <table>
+    <thead>
+      <tr>
+        <th>Criterio de evaluación normativa</th>
+        <th>Referencia oficial</th>
+        <th>Valor prescrito o límite</th>
+        <th>Valor obtenido en simulación</th>
+        <th>Dictamen técnico</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td><strong>Vehículo de diseño patrón</strong></td>
+        <td>Norma 3.1-IC (Tabla A3.1)</td>
+        <td>Preset reglamentario</td>
+        <td>${escapeHTML(compliance.patternCode)}</td>
+        <td><span class="status-pill status-${compliance.isStandardSpain ? "CLEAR" : "MARGIN_VIOLATION"}">${compliance.isStandardSpain ? "PATRÓN OFICIAL" : "EQUIVALENTE"}</span></td>
+      </tr>
+      <tr>
+        <td><strong>Longitud total del conjunto</strong></td>
+        <td>RD 2822/1998 Anexo IX</td>
+        <td>L &le; ${compliance.maxPermissibleLength.toFixed(2)} m</td>
+        <td>L = ${compliance.totalLength.toFixed(2)} m</td>
+        <td><span class="status-pill status-${compliance.lengthCompliant ? "CLEAR" : "COLLISION"}">${compliance.lengthCompliant ? "CONFORME" : "EXCEDE LÍMITE"}</span></td>
+      </tr>
+      <tr>
+        <td><strong>Anchura máxima de carrocería</strong></td>
+        <td>RD 2822/1998 Anexo IX</td>
+        <td>W &le; ${compliance.maxPermissibleWidth.toFixed(2)} m</td>
+        <td>W = ${compliance.maxWidth.toFixed(2)} m</td>
+        <td><span class="status-pill status-${compliance.widthCompliant ? "CLEAR" : "COLLISION"}">${compliance.widthCompliant ? "CONFORME" : "EXCEDE LÍMITE"}</span></td>
+      </tr>
+      <tr>
+        <td><strong>Radio de giro mín. en eje director delantero</strong></td>
+        <td>Guía Nudos Viarios (Tabla 2.3-D)</td>
+        <td>R<sub>f,min</sub> &ge; ${compliance.minNormRf.toFixed(2)} m</td>
+        <td>${compliance.hasArcs ? `R<sub>f,mín</sub> = ${compliance.minRfObserved.toFixed(2)} m` : "Alineación recta"}</td>
+        <td><span class="status-pill status-${compliance.radiusCompliant ? "CLEAR" : "MARGIN_VIOLATION"}">${compliance.radiusCompliant ? "CONFORME" : "GIRO CERRADO"}</span></td>
+      </tr>
+      <tr>
+        <td><strong>Resguardo y holgura mínima a obstáculos</strong></td>
+        <td>Instrucción de Carreteras</td>
+        <td>Margen libre &ge; ${(interferenceReport?.safetyMarginM ?? 0.30).toFixed(2)} m</td>
+        <td>d<sub>min</sub> = ${interferenceReport && interferenceReport.minClearanceM !== null ? `${interferenceReport.minClearanceM.toFixed(3)} m` : "Sin obstáculos"}</td>
+        <td><span class="status-pill status-${compliance.clearanceStatus}">${interferenceReport ? interferenceReport.globalStatusLabel : "CONFORME"}</span></td>
+      </tr>
+    </tbody>
+  </table>
+
+  <div style="margin-top:12px; padding:10px 14px; border:1px solid #0284c7; background:#f0f9ff; border-radius:4px; page-break-inside:avoid;">
+    <div style="font-weight:700; color:#0369a1; font-size:12px; margin-bottom:4px;">Dictamen global del ingeniero proyectista:</div>
+    <div style="font-size:11px; color:#0f172a;">
+      ${compliance.globalCompliant
+        ? "Se certifica que la maniobra analizada RESULTA GEOMÉTRICAMENTE VIABLE Y CONFORME a las especificaciones de diseño geométrico de la Norma 3.1-IC de Trazado de Carreteras y de la Guía de Nudos Viarios (OC 32/2012) del Ministerio de Transportes, respetando los gálibos legales y las holguras de resguardo viario exigibles."
+        : "La maniobra analizada presenta OBSERVACIONES O RESTRICCIONES en radios de curvatura o distancias de seguridad respecto a los márgenes normativos recomendados. Se aconseja revisar los sobreanchos y radios de acuerdo con el pliego técnico."
+      }
+    </div>
+  </div>
+
+  <div class="grid-2" style="margin-top:14px; page-break-inside:avoid;">
+    <div style="border:1px solid #cbd5e1; padding:8px 12px; border-radius:4px; font-size:10.5px;">
+      <strong>Diligencia técnica del proyecto:</strong><br>
+      <strong>Autor del estudio:</strong> ...................................................<br>
+      <strong>Colegiado n.º:</strong> ...................................................<br>
+      <strong>Organismo o consultora:</strong> ...................................................
+    </div>
+    <div style="border:1px solid #cbd5e1; padding:8px 12px; border-radius:4px; font-size:10.5px; text-align:center;">
+      <strong>Firma y fecha de conformidad:</strong><br><br><br>
+      <span>Fdo.: .....................................................................</span>
+    </div>
+  </div>
+
   <div class="warning-box">
     <strong>Advertencias técnicas, hipótesis y limitaciones del modelo (Apartado 12):</strong>
     <ul style="margin:4px 0 0 18px; padding:0;">
@@ -643,6 +914,19 @@ export function openStructuredTechnicalReport({
       <li>Esta simulación es una herramienta de apoyo al diseño viario y no sustituye la supervisión facultativa ni las comprobaciones in situ.</li>
     </ul>
   </div>
+
+  \x3Cscript>
+    function downloadMdReport() {
+      const mdText = ${JSON.stringify(mdContent)};
+      const blob = new Blob([mdText], { type: "text/markdown;charset=utf-8" });
+      const a = document.createElement("a");
+      a.href = URL.createObjectURL(blob);
+      a.download = "memoria_tecnica_barrido_${vehicle.id}.md";
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+    }
+  \x3C/script>
 </body>
 </html>`;
 
@@ -659,6 +943,156 @@ export function openStructuredTechnicalReport({
       "text/html;charset=utf-8"
     );
   }
+}
+
+/**
+ * Genera la Memoria Técnica Justificativa en formato Markdown (GFM) estructurado (MEJ-04).
+ */
+export function generateMarkdownTechnicalReport({
+  projectName = "Estudio de viabilidad geométrica y barrido de vehículos pesados",
+  scenarioName = "Escenario personalizado",
+  vehicle,
+  maneuver,
+  simResult,
+  interferenceReport,
+  obstacles = []
+}) {
+  const nowStr = new Date().toLocaleString("es-ES", {
+    dateStyle: "long",
+    timeStyle: "short"
+  });
+  const metrics = computeDerivedVehicleMetrics(vehicle);
+  const compliance = buildNormativeComplianceSummary({ vehicle, maneuver, simResult, interferenceReport });
+
+  const segmentsMd = (maneuver?.segments || [])
+    .map((seg, idx) => {
+      const dirLabel = seg.direction === -1 ? "Marcha atrás (Retroceso)" : "Avance (Directo)";
+      if (seg.type === "straight") {
+        return `| ${idx + 1} | Recta | ${dirLabel} | Longitud $L = ${Number(seg.length).toFixed(2)}\\text{ m}$ | $\\kappa = 0,000\\text{ m}^{-1}$ ($\\delta = 0,0^\\circ$) |`;
+      } else if (seg.type === "spline") {
+        const nPts = seg.waypoints ? seg.waypoints.length : (seg.samples ? seg.samples.length : 0);
+        const rMinStr = Number.isFinite(seg.minRadius) ? `${seg.minRadius.toFixed(2)}\\text{ m}` : "—";
+        return `| ${idx + 1} | Spline CAD continua (PCHIP) | ${dirLabel} | Longitud $L = ${Number(seg.totalLength || 0).toFixed(2)}\\text{ m}$ (${nPts} waypoints) | $R_{mín} = ${rMinStr}$ |`;
+      } else {
+        const turnDir = seg.angle >= 0 ? "Izquierda (+)" : "Derecha (-)";
+        return `| ${idx + 1} | Curva circular (${turnDir}) | ${dirLabel} | Radio $R_{ref} = ${Number(seg.radius).toFixed(2)}\\text{ m}$, Ángulo $\\Delta\\theta = ${Number(seg.angle).toFixed(1)}^\\circ$ | $\\kappa = ${(1 / seg.radius).toFixed(4)}\\text{ m}^{-1}$ |`;
+      }
+    })
+    .join("\n");
+
+  const obstaclesMd =
+    interferenceReport && interferenceReport.obstacleReports && interferenceReport.obstacleReports.length > 0
+      ? interferenceReport.obstacleReports
+          .map(
+            (r) =>
+              `| **${r.name}** (${r.type}) | **${r.statusLabel}** | ${r.minDistanceM !== null ? `${r.minDistanceM.toFixed(3)} m` : "N/E"} | PK ${r.distAlongPathM.toFixed(2)} m (${r.part || "—"}) |`
+          )
+          .join("\n")
+      : "| *Sin obstáculos activos* | CLEAR | — | — |";
+
+  return `# Memoria técnica de justificación de trayectoria de barrido (Swept Path Analysis)
+
+**Proyecto:** ${projectName}  
+**Escenario:** ${scenarioName}  
+**Fecha de cálculo:** ${nowStr}  
+**Motor cinemático:** Tractriz diferencial Runge-Kutta 4º orden (RK4) con integración continua de envolvente (ClipperLib)  
+
+---
+
+## 1. Vehículo de diseño y trazabilidad geométrica
+
+- **Denominación:** ${vehicle?.name || "Vehículo"} (${vehicle?.modelVariant || ""})
+- **Acreditación técnica:** ${vehicle?.verificationBadge || "Configuración de usuario"}
+- **Fuentes documentales:** ${(vehicle?.traceability && vehicle.traceability.sources ? vehicle.traceability.sources.join("; ") : "Catálogo oficial")}
+
+### 1.1. Cabeza tractora o vehículo tractor
+| Parámetro geométrico | Símbolo | Valor |
+|---|:---:|---:|
+| Distancia entre ejes (Batalla) | $L_{wb}$ | ${vehicle?.tractor?.wheelbase?.toFixed(3) || "—"} m |
+| Voladizo delantero / trasero | $L_{fo}$ / $L_{ro}$ | ${vehicle?.tractor?.frontOverhang?.toFixed(3) || "—"} m / ${vehicle?.tractor?.rearOverhang?.toFixed(3) || "—"} m |
+| Longitud de tractora sola | $L_{tractor}$ | ${metrics.tractorLength.toFixed(3)} m |
+| Anchura de carrocería | $W$ | ${vehicle?.tractor?.width?.toFixed(3) || "—"} m |
+| Avance de quinta rueda sobre eje motriz | $h$ | ${vehicle?.tractor?.hitchOffset !== undefined ? (vehicle.tractor.hitchOffset >= 0 ? "+" : "") + vehicle.tractor.hitchOffset.toFixed(3) : "—"} m |
+| Radio mínimo eje director / bordillo / barrido | $R_{ref}$ / $R_{rueda}$ / $R_{pared}$ | ${metrics.minRefRadius.toFixed(2)} m / ${metrics.minKerbTurningRadius.toFixed(2)} m / ${metrics.minWallTurningRadius.toFixed(2)} m |
+
+### 1.2. Semirremolque y conjunto articulado
+${vehicle?.trailer ? `| Parámetro de acoplamiento | Símbolo | Valor |
+|---|:---:|---:|
+| Distancia kingpin a centro trídem | $L_t$ | ${vehicle.trailer.wheelbase.toFixed(3)} m (${vehicle.trailer.axleCount || 3} ejes) |
+| Voladizo delantero / trasero | $L_{t,fo}$ / $L_{t,ro}$ | ${vehicle.trailer.frontOverhang.toFixed(3)} m / ${vehicle.trailer.rearOverhang.toFixed(3)} m |
+| Longitud semirremolque / Anchura | $L_{trailer}$ / $W_t$ | ${metrics.trailerLength.toFixed(3)} m / ${vehicle.trailer.width.toFixed(3)} m |
+| **Longitud total del conjunto acoplado** | **$L_{total}$** | **${metrics.totalCoupledLength.toFixed(3)} m** |
+| Radio de barrido frontal de esquina | $R_{front,swing}$ | ${metrics.frontSwingRadius.toFixed(3)} m |` : "*Vehículo rígido sin remolque articulado.*"}
+
+---
+
+## 2. Definición geométrica de la maniobra
+
+| Tramo | Tipo de alineación | Sentido | Geometría | Curvatura $\\kappa$ |
+|:---:|---|---|---|---|
+${segmentsMd}
+
+### 2.1. Parámetros numéricos y cinemáticos
+- **Posición inicial:** $(X_0 = ${Number(maneuver?.startPose?.x || 0).toFixed(2)}\\text{ m}, Y_0 = ${Number(maneuver?.startPose?.y || 0).toFixed(2)}\\text{ m}, \\theta_0 = ${Number(maneuver?.startPose?.headingDeg || 0).toFixed(1)}^\\circ)$
+- **Longitud total recorrida:** ${simResult?.summary?.totalDistanceM?.toFixed(2) || "0.00"} m (${simResult?.summary?.totalStates || 0} estados integrados)
+- **Discretización:** $\\Delta s = ${simResult?.summary?.discretization?.straightStepM ?? 0.05}\\text{ m}$, $\\Delta\\theta = ${simResult?.summary?.discretization?.arcStepDeg ?? 0.5}^\\circ$ (Método: ${(simResult?.summary?.discretization?.integrationMethod || "rk4").toUpperCase()})
+- **Tolerancia cordal estimada:** $\\le ${((simResult?.summary?.discretization?.estimatedChordalToleranceM || 0.001) * 1000).toFixed(2)}\\text{ mm}$
+- **Ángulo de dirección máximo alcanzado:** $\\delta_{máx} = ${simResult?.summary?.maxSteerAngleDeg?.toFixed(1) || "0.0"}^\\circ$ (límite mecánico: ${vehicle?.tractor?.maxSteerAngleDeg || 45}^\\circ)
+- **Ángulo de articulación máximo alcanzado:** $\\gamma_{máx} = ${simResult?.summary?.maxArticulationAngleDeg?.toFixed(1) || "0.0"}^\\circ$ (límite admisible: ${vehicle?.limits?.maxArticulationAngleDeg || 85}^\\circ)
+- **Anchura máxima de barrido dinámico:** **${simResult?.summary?.maxSweptWidthM?.toFixed(2) || "—"} m**
+
+---
+
+## 3. Comprobación de elementos viarios, márgenes y distancias libres
+
+- **Dictamen global de holguras:** **${interferenceReport ? interferenceReport.globalStatusLabel : "SIN OBSTÁCULOS"}**
+- **Margen de seguridad configurado:** ${(interferenceReport?.safetyMarginM ?? 0.30).toFixed(2)} m
+- **Distancia mínima registrada a obstáculos:** ${interferenceReport && interferenceReport.minClearanceM !== null ? `${interferenceReport.minClearanceM.toFixed(3)} m` : "Sin obstáculos activos"}
+
+| Elemento viario u obstáculo | Estado | Distancia mínima libre | PK crítico |
+|---|:---:|:---:|:---:|
+${obstaclesMd}
+
+---
+
+## 4. Cuadro de conformidad normativa española y europea
+
+| Criterio de evaluación | Norma de referencia | Valor prescrito o límite | Valor simulado | Dictamen |
+|---|---|---|---|:---:|
+| **Vehículo patrón de diseño** | Norma 3.1-IC (Tabla A3.1) | F, C, T o A reglamentario | ${compliance.patternCode} | **${compliance.isStandardSpain ? "PATRÓN OFICIAL" : "EQUIVALENTE"}** |
+| **Longitud total del conjunto** | RD 2822/1998 Anexo IX | $L \\le ${compliance.maxPermissibleLength.toFixed(2)}\\text{ m}$ | $L = ${compliance.totalLength.toFixed(2)}\\text{ m}$ | **${compliance.lengthCompliant ? "CONFORME" : "EXCEDE LÍMITE"}** |
+| **Anchura máxima exterior** | RD 2822/1998 Anexo IX | $W \\le ${compliance.maxPermissibleWidth.toFixed(2)}\\text{ m}$ | $W = ${compliance.maxWidth.toFixed(2)}\\text{ m}$ | **${compliance.widthCompliant ? "CONFORME" : "EXCEDE LÍMITE"}** |
+| **Radio mín. eje director delantero** | Guía Nudos Viarios (Tabla 2.3-D) | $R_{f,min} \\ge ${compliance.minNormRf.toFixed(2)}\\text{ m}$ | ${compliance.hasArcs ? `R_{f,min} = ${compliance.minRfObserved.toFixed(2)} m` : "Alineación recta"} | **${compliance.radiusCompliant ? "CONFORME" : "GIRO CERRADO"}** |
+| **Resguardo a elementos viarios** | Instrucción de Carreteras | Holgura libre $\\ge ${(interferenceReport?.safetyMarginM ?? 0.30).toFixed(2)}\\text{ m}$ | $d_{min} = ${interferenceReport && interferenceReport.minClearanceM !== null ? `${interferenceReport.minClearanceM.toFixed(3)} m` : "N/A"}$ | **${compliance.clearanceCompliant ? "CONFORME" : "REVISAR MARGEN"}** |
+
+### 4.1. Dictamen final de viabilidad geométrica
+${compliance.globalCompliant
+  ? "> **DICTAMEN FAVORABLE:** Se dictamina que la maniobra ensayada resulta **GEOMÉTRICAMENTE VIABLE Y CONFORME** con los parámetros y recomendaciones técnicas de la **Norma 3.1-IC de Trazado de Carreteras** y de la **Guía de Nudos Viarios (OC 32/2012)** del Ministerio de Transportes, respetando los gálibos legales y las holguras de resguardo viario exigibles."
+  : "> **DICTAMEN CONDICIONADO / DESFAVORABLE:** La maniobra analizada presenta invasiones de márgenes de resguardo o radios de giro inferiores a las recomendaciones técnicas oficiales. Se recomienda el rediseño del radio de curvatura o la ampliación del sobreancho de calzada."
+}
+
+---
+
+## 5. Diligencia de responsabilidad y visado facultativo
+
+- **Autor del estudio:** ...................................................
+- **N.º de colegiado:** ...................................................
+- **Organismo o consultora:** ...................................................
+- **Fecha y firma:** ...................................................
+
+---
+*Documento generado automáticamente por TurnSim / Open Swept Path Analyzer (OSPA).*  
+*Hipótesis de cálculo: cinemática de arrastre a baja velocidad ($v \\le 15\\text{ km/h}$) sin deslizamiento lateral (Ackermann + tractriz diferencial RK4).*
+`;
+}
+
+/**
+ * Descarga directamente la Memoria Técnica en formato Markdown (MEJ-04).
+ */
+export function downloadMarkdownTechnicalReport(options) {
+  const md = generateMarkdownTechnicalReport(options);
+  const vehId = options.vehicle?.id || "vehiculo";
+  downloadTextFile(`memoria_tecnica_barrido_${vehId}.md`, md, "text/markdown;charset=utf-8");
 }
 
 /**

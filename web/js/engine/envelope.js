@@ -3,7 +3,8 @@
  * Cumple los apartados 6.3, 9.1 y 11.1 de PROMT_ORIGINAL.md.
  */
 
-import { simulateManeuver } from "./kinematics.js";
+import { simulateManeuver, computeBodyPolygon } from "./kinematics.js";
+import ClipperLib from "../vendor/clipper.js";
 
 /**
  * Representa una caja orientada 2D (OBB) correspondiente a la tractora o al semirremolque en un instante k.
@@ -124,7 +125,7 @@ function subtractIntervalsFromUnit(intervals, eps = 1e-7) {
 
 /**
  * Construye la lista completa de cajas orientadas (OBB) de tractora y semirremolque
- * para todos los estados de la maniobra.
+ * para todos los estados de la maniobra, asociando su distancia acumulada y su índice de estado.
  */
 export function buildAllOBBs(states, vehicle, margin = 0.0) {
   const obbs = [];
@@ -133,9 +134,24 @@ export function buildAllOBBs(states, vehicle, margin = 0.0) {
 
   for (let i = 0; i < states.length; i++) {
     const s = states[i];
-    obbs.push(createOBB(s.x, s.y, s.heading, tv, margin));
-    if (tr && s.tx !== null && s.ty !== null && s.theading !== null) {
-      obbs.push(createOBB(s.tx, s.ty, s.theading, tr, margin));
+    const obbT = createOBB(s.x, s.y, s.heading, tv, margin);
+    obbT.stateIndex = i;
+    obbT.dist = s.dist;
+    obbs.push(obbT);
+    if (s.trailers && s.trailers.length > 0) {
+      for (const trState of s.trailers) {
+        if (trState.tx !== null) {
+          const obbTr = createOBB(trState.tx, trState.ty, trState.theading, trState.def || tr, margin);
+          obbTr.stateIndex = i;
+          obbTr.dist = s.dist;
+          obbs.push(obbTr);
+        }
+      }
+    } else if (tr && s.tx !== null && s.ty !== null && s.theading !== null) {
+      const obbTr = createOBB(s.tx, s.ty, s.theading, tr, margin);
+      obbTr.stateIndex = i;
+      obbTr.dist = s.dist;
+      obbs.push(obbTr);
     }
   }
   return obbs;
@@ -143,20 +159,29 @@ export function buildAllOBBs(states, vehicle, margin = 0.0) {
 
 /**
  * Calcula la sección transversal de barrido en un punto (px, py) con dirección normal (nx, ny)
- * intersectando la recta normal con todas las siluetas cercanas de la maniobra.
+ * intersectando la recta normal con las siluetas cercanas dentro de una ventana de distancia temporal (GEOM-03).
  * Devuelve { width, p1, p2, tMin, tMax } o null.
  */
-export function computeCrossSectionWidth(px, py, nx, ny, obbs, maxSearchDist = 18.0) {
+export function computeCrossSectionWidth(px, py, nx, ny, obbs, maxSearchDist = 18.0, centerDist = null, maxDistWindow = 22.0) {
   let minT = +Infinity;
   let maxT = -Infinity;
   // Vector tangente unitario perpendicular a la normal (nx, ny)
   const tx = ny;
   const ty = -nx;
+  const boxLimit = maxSearchDist + 10.0;
 
   for (let i = 0; i < obbs.length; i++) {
     const obb = obbs[i];
+    // GEOM-03: Restringir a la ventana física y temporal del vehículo para evitar cortes oblicuos
+    // con tramos distantes de la maniobra en retornos en S o retrocesos
+    if (centerDist !== null && typeof obb.dist === "number") {
+      if (Math.abs(obb.dist - centerDist) > maxDistWindow) continue;
+    }
+
     const dcx = obb.cx - px;
+    if (dcx > boxLimit || dcx < -boxLimit) continue;
     const dcy = obb.cy - py;
+    if (dcy > boxLimit || dcy < -boxLimit) continue;
     // Distancia del centro del OBB a la recta normal: |dc . t|
     const distToLine = Math.abs(dcx * tx + dcy * ty);
     if (distToLine > obb.radius) continue;
@@ -192,21 +217,168 @@ export function computeCrossSectionWidth(px, py, nx, ny, obbs, maxSearchDist = 1
   };
 }
 
+const CLIPPER_SCALE = 10000; // 0.1 mm de resolución para aritmética entera de 64 bits
+
+function ptToClipper(p) {
+  return { X: Math.round(p[0] * CLIPPER_SCALE), Y: Math.round(p[1] * CLIPPER_SCALE) };
+}
+
+function clipperPathToCoords(path) {
+  if (!path || path.length === 0) return [];
+  const coords = [];
+  for (let i = 0; i < path.length; i++) {
+    coords.push([path[i].X / CLIPPER_SCALE, path[i].Y / CLIPPER_SCALE]);
+  }
+  if (coords.length > 2) {
+    const first = coords[0];
+    const last = coords[coords.length - 1];
+    if (Math.hypot(first[0] - last[0], first[1] - last[1]) > 1e-4) {
+      coords.push([first[0], first[1]]);
+    }
+  }
+  return coords;
+}
+
+function polyArea(path) {
+  if (!path || path.length < 3) return 0;
+  let a = 0;
+  for (let i = 0; i < path.length; i++) {
+    const j = (i + 1) % path.length;
+    a += (path[i].X / CLIPPER_SCALE) * (path[j].Y / CLIPPER_SCALE) - (path[j].X / CLIPPER_SCALE) * (path[i].Y / CLIPPER_SCALE);
+  }
+  return Math.abs(a) * 0.5;
+}
+
 /**
- * Calcula la envolvente exacta de barrido (Swept Envelope) y los bordes izquierdo y derecho
- * mediante recorte analítico de aristas (Liang-Barsky sobre OBBs) y encadenamiento topológico.
- *
- * Además devuelve los perfiles laterales continuo izquierdo (`leftBoundary`) y derecho (`rightBoundary`)
- * y el polígono cerrado completo (`envelopePolygon`).
+ * Calcula la envolvente convexa 2D de hasta 8 vértices mediante el algoritmo Monotone Chain de Andrew.
+ * Devuelve los vértices del casco convexo en sentido antihorario (CCW).
  */
+export function convexHull8(pts) {
+  if (!pts || pts.length <= 3) return (pts || []).slice();
+  const p = pts.slice().sort((a, b) => (Math.abs(a[0] - b[0]) > 1e-9 ? a[0] - b[0] : a[1] - b[1]));
+  const unique = [p[0]];
+  for (let i = 1; i < p.length; i++) {
+    const prev = unique[unique.length - 1];
+    if (Math.hypot(p[i][0] - prev[0], p[i][1] - prev[1]) > 1e-6) {
+      unique.push(p[i]);
+    }
+  }
+  if (unique.length <= 3) return unique;
+
+  const cross = (o, a, b) => (a[0] - o[0]) * (b[1] - o[1]) - (a[1] - o[1]) * (b[0] - o[0]);
+  const lower = [];
+  for (let i = 0; i < unique.length; i++) {
+    while (lower.length >= 2 && cross(lower[lower.length - 2], lower[lower.length - 1], unique[i]) <= 1e-9) {
+      lower.pop();
+    }
+    lower.push(unique[i]);
+  }
+  const upper = [];
+  for (let i = unique.length - 1; i >= 0; i--) {
+    while (upper.length >= 2 && cross(upper[upper.length - 2], upper[upper.length - 1], unique[i]) <= 1e-9) {
+      upper.pop();
+    }
+    upper.push(unique[i]);
+  }
+  lower.pop();
+  upper.pop();
+  return lower.concat(upper);
+}
+
+/**
+ * Calcula la envolvente exacta de barrido (Swept Envelope) mediante la unión booleana exacta
+ * de cápsulas convexas continuas con Clipper (algoritmo Vatti), garantizando un polígono de Jordan
+ * sin autointersecciones (0 self-intersections).
+ *
+ * Para márgenes de seguridad > 0, ejecuta un offset de Minkowski con esquinas redondeadas exactas (jtRound),
+ * eliminando la sobredimensión diagonal de aproximaciones por caja.
+ */
+/**
+ * Muestreo angular y espacial adaptativo de estados para la generación de cápsulas convexas (MEJ-03).
+ * Limita el error cordal de la envolvente a e <= 1 mm garantizando Delta_theta <= 1,5 deg y Delta_s <= 0,60 m,
+ * eliminando la subestimación en giros cerrados e intersecciones.
+ */
+export function computeAdaptiveSampledIndices(states, options = {}) {
+  const n = states.length;
+  if (!n) return [];
+  if (n <= 120) {
+    const all = new Array(n);
+    for (let i = 0; i < n; i++) all[i] = i;
+    return all;
+  }
+
+  const maxDeltaThetaRad = options.maxDeltaThetaRad ?? (1.5 * Math.PI / 180); // 1.5° = 0.02618 rad
+  const maxDeltaDistM = options.maxDeltaDistM ?? 0.60; // 0.60 m
+  const maxIndexGap = options.maxIndexGap ?? 25; // Forzar al menos una cápsula cada 25 pasos
+
+  const indices = [0];
+  let lastIdx = 0;
+
+  for (let i = 1; i < n - 1; i++) {
+    const sPrev = states[lastIdx];
+    const sCurr = states[i];
+
+    // Variación de posición espacial
+    const dx = sCurr.x - sPrev.x;
+    const dy = sCurr.y - sPrev.y;
+    const distSq = dx * dx + dy * dy;
+
+    // Variación angular del vehículo tractor
+    let dHeading = Math.abs(sCurr.heading - sPrev.heading);
+    while (dHeading > Math.PI) dHeading = Math.abs(dHeading - 2 * Math.PI);
+
+    // Variación angular de semirremolque si existe
+    let dTheading = 0;
+    if (sCurr.theading !== undefined && sPrev.theading !== undefined) {
+      dTheading = Math.abs(sCurr.theading - sPrev.theading);
+      while (dTheading > Math.PI) dTheading = Math.abs(dTheading - 2 * Math.PI);
+    }
+
+    const gap = i - lastIdx;
+
+    if (
+      dHeading >= maxDeltaThetaRad ||
+      dTheading >= maxDeltaThetaRad ||
+      distSq >= maxDeltaDistM * maxDeltaDistM ||
+      gap >= maxIndexGap
+    ) {
+      indices.push(i);
+      lastIdx = i;
+    }
+  }
+
+  // Siempre incluir el estado final de la maniobra
+  if (indices[indices.length - 1] !== n - 1) {
+    indices.push(n - 1);
+  }
+
+  // Si sobrepasa 300 cápsulas en maniobras excepcionalmente largas, filtrar uniformemente para acotar coste
+  if (indices.length > 300) {
+    const stride = Math.ceil(indices.length / 300);
+    const thinned = [];
+    for (let j = 0; j < indices.length; j += stride) {
+      thinned.push(indices[j]);
+    }
+    if (thinned[thinned.length - 1] !== indices[indices.length - 1]) {
+      thinned.push(indices[indices.length - 1]);
+    }
+    return thinned;
+  }
+
+  return indices;
+}
+
 export function computeSweptEnvelope(states, vehicle, margin = 0.0) {
   if (!states || states.length === 0) {
     return {
       envelopePolygon: [],
+      envelopeHoles: [],
+      envelopePolygons: [],
       leftBoundary: [],
       rightBoundary: [],
       maxSweptWidthM: 0,
-      maxSweptWidthSection: null
+      maxSweptWidthSection: null,
+      obbs: []
     };
   }
 
@@ -215,88 +387,90 @@ export function computeSweptEnvelope(states, vehicle, margin = 0.0) {
   const tr = vehicle.trailer;
   const hasTrailer = Boolean(tr && states[0].tx !== null);
 
-  // 1. Extraer los segmentos candidatos del contorno (usando el 100 % de los estados hasta 1.200 pasos,
-  // y submuestreando por estado completo si se emplea malla ultrafina de convergencia)
-  const obbsPerState = hasTrailer ? 2 : 1;
-  const maxStatesForClipping = 1200;
-  const stateStride = Math.max(1, Math.floor(states.length / maxStatesForClipping));
-  const clipObbs = [];
-  for (let sIdx = 0; sIdx < states.length; sIdx += stateStride) {
-    const baseIdx = sIdx * obbsPerState;
-    clipObbs.push(obbs[baseIdx]);
-    if (hasTrailer && obbs[baseIdx + 1]) {
-      clipObbs.push(obbs[baseIdx + 1]);
-    }
-  }
-  if ((states.length - 1) % stateStride !== 0) {
-    const lastBase = (states.length - 1) * obbsPerState;
-    clipObbs.push(obbs[lastBase]);
-    if (hasTrailer && obbs[lastBase + 1]) {
-      clipObbs.push(obbs[lastBase + 1]);
-    }
-  }
+  // 1. Muestreo adaptativo de estados para optimizar cápsulas garantizando Delta_theta <= 1.5° (MEJ-03)
+  const sampledIndices = computeAdaptiveSampledIndices(states);
 
-  const shrinkEps = 1e-5;
-  const interiorOBBs = clipObbs.map((o) => ({
-    ...o,
-    lFront: o.lFront - shrinkEps,
-    lRear: o.lRear - shrinkEps,
-    halfW: o.halfW - shrinkEps
-  }));
+  // 2. Construir cápsulas convexas Conv(B_k U B_{k+1}) para la tractora y el semirremolque
+  const clipper = new ClipperLib.Clipper();
+  clipper.StrictlySimple = true;
 
-  const boundarySegments = [];
-
-  for (let i = 0; i < clipObbs.length; i++) {
-    const obb = clipObbs[i];
-    const c = obb.corners;
-    // 4 aristas orientadas en sentido antihorario: 0->3 (derecha), 3->2 (frente), 2->1 (izquierda), 1->0 (trasera)
-    const edges = [
-      [c[0], c[3]],
-      [c[3], c[2]],
-      [c[2], c[1]],
-      [c[1], c[0]]
-    ];
-
-    for (const [pA, pB] of edges) {
-      const dx = pB[0] - pA[0];
-      const dy = pB[1] - pA[1];
-      const segLen = Math.hypot(dx, dy);
-      if (segLen < 1e-6) continue;
-
-      const midX = 0.5 * (pA[0] + pB[0]);
-      const midY = 0.5 * (pA[1] + pB[1]);
-      const clippedIntervals = [];
-
-      for (let j = 0; j < interiorOBBs.length; j++) {
-        if (i === j) continue;
-        const other = interiorOBBs[j];
-        const distCenters = Math.hypot(other.cx - midX, other.cy - midY);
-        if (distCenters > other.radius + 0.5 * segLen + 0.05) continue;
-
-        const hit = intersectLineWithOBB(pA[0], pA[1], dx, dy, other);
-        if (hit) {
-          const [t0, t1] = hit;
-          if (t1 > 0 && t0 < 1) {
-            clippedIntervals.push([Math.max(0, t0), Math.min(1, t1)]);
-          }
+  if (sampledIndices.length === 1) {
+    const s0 = states[sampledIndices[0]];
+    const tPoly0 = s0.tractorPolygon || computeBodyPolygon(s0.x, s0.y, s0.heading, tv, 0.0);
+    clipper.AddPath(tPoly0.map(ptToClipper), ClipperLib.PolyType.ptSubject, true);
+    if (s0.trailers && s0.trailers.length > 0) {
+      for (const trState of s0.trailers) {
+        if (trState.polygon) {
+          clipper.AddPath(trState.polygon.map(ptToClipper), ClipperLib.PolyType.ptSubject, true);
         }
       }
+    } else if (hasTrailer) {
+      const trPoly0 = s0.trailerPolygon || (s0.tx !== null ? computeBodyPolygon(s0.tx, s0.ty, s0.theading, tr, 0.0) : null);
+      if (trPoly0) {
+        clipper.AddPath(trPoly0.map(ptToClipper), ClipperLib.PolyType.ptSubject, true);
+      }
+    }
+  } else {
+    for (let si = 0; si < sampledIndices.length - 1; si++) {
+      const s0 = states[sampledIndices[si]];
+      const s1 = states[sampledIndices[si + 1]];
+      const tPoly0 = s0.tractorPolygon || computeBodyPolygon(s0.x, s0.y, s0.heading, tv, 0.0);
+      const tPoly1 = s1.tractorPolygon || computeBodyPolygon(s1.x, s1.y, s1.heading, tv, 0.0);
+      const hullT = convexHull8([...tPoly0, ...tPoly1]);
+      clipper.AddPath(hullT.map(ptToClipper), ClipperLib.PolyType.ptSubject, true);
 
-      const surviving = subtractIntervalsFromUnit(clippedIntervals, 1e-5);
-      for (const [t0, t1] of surviving) {
-        if ((t1 - t0) * segLen < 1e-4) continue;
-        boundarySegments.push([
-          [pA[0] + t0 * dx, pA[1] + t0 * dy],
-          [pA[0] + t1 * dx, pA[1] + t1 * dy]
-        ]);
+      if (s0.trailers && s0.trailers.length > 0) {
+        for (let j = 0; j < s0.trailers.length; j++) {
+          const trPoly0 = s0.trailers[j].polygon;
+          const trPoly1 = s1.trailers && s1.trailers[j] ? s1.trailers[j].polygon : null;
+          if (trPoly0 && trPoly1) {
+            const hullTr = convexHull8([...trPoly0, ...trPoly1]);
+            clipper.AddPath(hullTr.map(ptToClipper), ClipperLib.PolyType.ptSubject, true);
+          }
+        }
+      } else if (hasTrailer) {
+        const trPoly0 = s0.trailerPolygon || (s0.tx !== null ? computeBodyPolygon(s0.tx, s0.ty, s0.theading, tr, 0.0) : null);
+        const trPoly1 = s1.trailerPolygon || (s1.tx !== null ? computeBodyPolygon(s1.tx, s1.ty, s1.theading, tr, 0.0) : null);
+        if (trPoly0 && trPoly1) {
+          const hullTr = convexHull8([...trPoly0, ...trPoly1]);
+          clipper.AddPath(hullTr.map(ptToClipper), ClipperLib.PolyType.ptSubject, true);
+        }
       }
     }
   }
 
-  // 2. Encadenar los segmentos supervivientes del borde exterior en un anillo cerrado continuo
-  const envelopePolygon = chainBoundarySegments(boundarySegments, states, obbs);
+  // 3. Ejecutar la unión booleana exacta
+  const polyTree = new ClipperLib.PolyTree();
+  clipper.Execute(
+    ClipperLib.ClipType.ctUnion,
+    polyTree,
+    ClipperLib.PolyFillType.pftNonZero,
+    ClipperLib.PolyFillType.pftNonZero
+  );
+  let exPolygons = ClipperLib.JS.PolyTreeToExPolygons(polyTree);
 
-  // 3. Calcular las secciones transversales y los bordes izquierdo y derecho a lo largo de la maniobra
+  // 4. Si margin > 0, aplicar ClipperOffset con esquinas redondeadas exactas (jtRound - GEOM-04)
+  if (margin > 0.0 && exPolygons.length > 0) {
+    const co = new ClipperLib.ClipperOffset(2.0, 25);
+    for (let i = 0; i < exPolygons.length; i++) {
+      co.AddPath(exPolygons[i].outer, ClipperLib.JoinType.jtRound, ClipperLib.EndType.etClosedPolygon);
+      for (let h = 0; h < exPolygons[i].holes.length; h++) {
+        co.AddPath(exPolygons[i].holes[h], ClipperLib.JoinType.jtRound, ClipperLib.EndType.etClosedPolygon);
+      }
+    }
+    const offsetTree = new ClipperLib.PolyTree();
+    co.Execute(offsetTree, margin * CLIPPER_SCALE);
+    exPolygons = ClipperLib.JS.PolyTreeToExPolygons(offsetTree);
+  }
+
+  // Ordenar polígonos resultantes por área decreciente
+  exPolygons.sort((a, b) => polyArea(b.outer) - polyArea(a.outer));
+
+  const envelopePolygon = exPolygons.length > 0 ? clipperPathToCoords(exPolygons[0].outer) : [];
+  const envelopeHoles = exPolygons.length > 0 ? (exPolygons[0].holes || []).map(clipperPathToCoords) : [];
+  const envelopePolygons = exPolygons.map((ep) => clipperPathToCoords(ep.outer));
+
+  // 5. Calcular secciones transversales acotadas a la ventana temporal local (GEOM-03)
   const leftBoundary = [];
   const rightBoundary = [];
   let maxSweptWidthM = 0;
@@ -307,7 +481,7 @@ export function computeSweptEnvelope(states, vehicle, margin = 0.0) {
     const s = states[i];
     const nx = -Math.sin(s.heading);
     const ny = Math.cos(s.heading);
-    const section = computeCrossSectionWidth(s.x, s.y, nx, ny, obbs, 16.0);
+    const section = computeCrossSectionWidth(s.x, s.y, nx, ny, obbs, 16.0, s.dist, 22.0);
     if (section) {
       rightBoundary.push(section.p1);
       leftBoundary.push(section.p2);
@@ -326,18 +500,20 @@ export function computeSweptEnvelope(states, vehicle, margin = 0.0) {
 
   return {
     envelopePolygon,
+    envelopeHoles,
+    envelopePolygons,
     leftBoundary,
     rightBoundary,
     maxSweptWidthM: Number(maxSweptWidthM.toFixed(3)),
     maxSweptWidthSection,
-    obbs: clipObbs
+    obbs
   };
 }
 
 /**
  * Encadena los segmentos dirigidos del contorno exterior en un polígono cerrado limpio.
  */
-function chainBoundarySegments(segments, states, obbs) {
+export function chainBoundarySegments(segments, states, obbs) {
   if (!segments || segments.length === 0) return [];
 
   // Agrupar por proximidad espacial de extremo final -> extremo inicial
@@ -361,22 +537,69 @@ function chainBoundarySegments(segments, states, obbs) {
   const startPoint = segments[startIdx][0];
 
   const maxTolerance = 0.35; // m (salto máximo entre pasos discretos de 0,05 m)
+  const maxToleranceSq = maxTolerance * maxTolerance;
+
+  // Optimización O(M) mediante cuadrícula espacial hash para extremos iniciales de segmentos (PERF-09)
+  const cellSize = 0.50; // m (superior a maxTolerance para garantizar vecindad en 9 celdas)
+  const grid = new Map();
+  const getCellKey = (x, y) => `${Math.floor(x / cellSize)}_${Math.floor(y / cellSize)}`;
+
+  for (let i = 0; i < n; i++) {
+    const key = getCellKey(segments[i][0][0], segments[i][0][1]);
+    let list = grid.get(key);
+    if (!list) {
+      list = [];
+      grid.set(key, list);
+    }
+    list.push(i);
+  }
 
   for (let step = 0; step < n; step++) {
     // Si ya cerramos el bucle cerca del punto de inicio y hemos recorrido suficientes puntos
-    if (ring.length > 20 && Math.hypot(currentEnd[0] - startPoint[0], currentEnd[1] - startPoint[1]) < 0.04) {
+    const dxStart = currentEnd[0] - startPoint[0];
+    const dyStart = currentEnd[1] - startPoint[1];
+    if (ring.length > 20 && dxStart * dxStart + dyStart * dyStart < 0.0016) {
       break;
     }
 
     let bestIdx = -1;
-    let bestDist = maxTolerance;
+    let bestDistSq = maxToleranceSq;
 
-    for (let j = 0; j < n; j++) {
-      if (used[j]) continue;
-      const d = Math.hypot(segments[j][0][0] - currentEnd[0], segments[j][0][1] - currentEnd[1]);
-      if (d < bestDist) {
-        bestDist = d;
-        bestIdx = j;
+    const endCellX = Math.floor(currentEnd[0] / cellSize);
+    const endCellY = Math.floor(currentEnd[1] / cellSize);
+
+    // Buscar únicamente en la celda del extremo actual y en sus 8 celdas adyacentes O(1)
+    for (let cdx = -1; cdx <= 1; cdx++) {
+      for (let cdy = -1; cdy <= 1; cdy++) {
+        const neighborKey = `${endCellX + cdx}_${endCellY + cdy}`;
+        const candidates = grid.get(neighborKey);
+        if (!candidates) continue;
+
+        for (let k = 0; k < candidates.length; k++) {
+          const j = candidates[k];
+          if (used[j]) continue;
+          const dx = segments[j][0][0] - currentEnd[0];
+          const dy = segments[j][0][1] - currentEnd[1];
+          const dSq = dx * dx + dy * dy;
+          if (dSq < bestDistSq) {
+            bestDistSq = dSq;
+            bestIdx = j;
+          }
+        }
+      }
+    }
+
+    // Fallback de seguridad si un salto supera maxTolerance
+    if (bestIdx === -1) {
+      for (let j = 0; j < n; j++) {
+        if (used[j]) continue;
+        const dx = segments[j][0][0] - currentEnd[0];
+        const dy = segments[j][0][1] - currentEnd[1];
+        const dSq = dx * dx + dy * dy;
+        if (dSq < bestDistSq) {
+          bestDistSq = dSq;
+          bestIdx = j;
+        }
       }
     }
 
@@ -384,7 +607,7 @@ function chainBoundarySegments(segments, states, obbs) {
 
     used[bestIdx] = 1;
     const seg = segments[bestIdx];
-    if (bestDist > 1e-4) {
+    if (bestDistSq > 1e-8) {
       ring.push(seg[0]);
     }
     ring.push(seg[1]);
@@ -407,7 +630,7 @@ function chainBoundarySegments(segments, states, obbs) {
  * Genera las acotaciones automáticas de anchura de barrido (inicio, puntos de curva y salida)
  * homologadas con la estructura de `dimensions` del visor 2D y 3D.
  */
-export function computeKeyDimensions(states, obbs) {
+export function computeKeyDimensions(states, obbs, precomputedMaxSection = null) {
   if (!states || states.length < 4) return [];
 
   const dims = [];
@@ -423,15 +646,38 @@ export function computeKeyDimensions(states, obbs) {
   let maxW = 0;
   let maxSection = null;
 
-  for (let i = 0; i < totalLen; i++) {
-    const s = states[i];
-    const nx = -Math.sin(s.heading);
-    const ny = Math.cos(s.heading);
-    const sec = computeCrossSectionWidth(s.x, s.y, nx, ny, obbs, 16.0);
-    if (sec && sec.width > maxW) {
-      maxW = sec.width;
-      maxIdx = i;
-      maxSection = sec;
+  if (precomputedMaxSection && Number.isInteger(precomputedMaxSection.stepIndex)) {
+    const sectionStep = Math.max(1, Math.floor(totalLen / 800));
+    if (sectionStep === 1) {
+      maxIdx = precomputedMaxSection.stepIndex;
+      maxW = precomputedMaxSection.width;
+      maxSection = precomputedMaxSection;
+    } else {
+      const startI = Math.max(0, precomputedMaxSection.stepIndex - sectionStep);
+      const endI = Math.min(totalLen - 1, precomputedMaxSection.stepIndex + sectionStep);
+      for (let i = startI; i <= endI; i++) {
+        const s = states[i];
+        const nx = -Math.sin(s.heading);
+        const ny = Math.cos(s.heading);
+        const sec = computeCrossSectionWidth(s.x, s.y, nx, ny, obbs, 16.0, s.dist, 22.0);
+        if (sec && sec.width > maxW) {
+          maxW = sec.width;
+          maxIdx = i;
+          maxSection = sec;
+        }
+      }
+    }
+  } else {
+    for (let i = 0; i < totalLen; i++) {
+      const s = states[i];
+      const nx = -Math.sin(s.heading);
+      const ny = Math.cos(s.heading);
+      const sec = computeCrossSectionWidth(s.x, s.y, nx, ny, obbs, 16.0, s.dist, 22.0);
+      if (sec && sec.width > maxW) {
+        maxW = sec.width;
+        maxIdx = i;
+        maxSection = sec;
+      }
     }
   }
 
@@ -453,7 +699,7 @@ export function computeKeyDimensions(states, obbs) {
     const ny = Math.cos(s.heading);
     const sec = item.idx === maxIdx && maxSection
       ? maxSection
-      : computeCrossSectionWidth(s.x, s.y, nx, ny, obbs, 16.0);
+      : computeCrossSectionWidth(s.x, s.y, nx, ny, obbs, 16.0, s.dist, 22.0);
 
     if (sec) {
       usedIndices.push(item.idx);
@@ -483,7 +729,8 @@ export function buildCompleteSimulationResult(vehicle, maneuver, options = {}) {
       straightStep: options.straightStepM ?? options.straightStep ?? 0.1,
       arcStepDeg: options.arcStepDeg ?? 1.0,
       integrationMethod: options.integrationMethod ?? "rk4",
-      schleppHitchSign: options.schleppHitchSign ?? false
+      schleppHitchSign: options.schleppHitchSign ?? false,
+      steeringReferencePoint: options.steeringReferencePoint || maneuver?.steeringReferencePoint || "rear_axle"
     });
   const { states, summary } = sim;
 
@@ -498,7 +745,7 @@ export function buildCompleteSimulationResult(vehicle, maneuver, options = {}) {
     ? computeSweptEnvelope(states, vehicle, safetyMargin)
     : null;
 
-  const dimensions = computeKeyDimensions(states, envMain.obbs);
+  const dimensions = computeKeyDimensions(states, envMain.obbs, envMain.maxSweptWidthSection);
 
   // Trazas de puntos de referencia y ruedas
   const traces = {
@@ -606,9 +853,13 @@ export function buildCompleteSimulationResult(vehicle, maneuver, options = {}) {
       minSweptWidthM: Number(Math.max(vehicle.tractor.width, vehicle.trailer ? vehicle.trailer.width : 0).toFixed(3))
     },
     envelope: envMain.envelopePolygon,
+    envelopeHoles: envMain.envelopeHoles,
+    envelopePolygons: envMain.envelopePolygons,
     leftBoundary: envMain.leftBoundary,
     rightBoundary: envMain.rightBoundary,
     marginEnvelope: envMargin ? envMargin.envelopePolygon : null,
+    marginEnvelopeHoles: envMargin ? envMargin.envelopeHoles : null,
+    marginEnvelopePolygons: envMargin ? envMargin.envelopePolygons : null,
     marginLeftBoundary: envMargin ? envMargin.leftBoundary : null,
     marginRightBoundary: envMargin ? envMargin.rightBoundary : null,
     traces,

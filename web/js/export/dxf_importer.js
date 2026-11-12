@@ -27,6 +27,7 @@ export const SUGGESTED_LAYERS = {
     "TRAYECTORIA",
     "EJE_CAMION",
     "EJE_TRAYECTORIA",
+    "EJE_VIAL",
     "EJE",
     "TRAJECTORY",
     "SWEPT_AXIS",
@@ -40,9 +41,27 @@ export const SUGGESTED_LAYERS = {
     "OBSTACULO",
     "EDIFICIOS",
     "EDIFICIO",
+    "MUELLES_CARGA",
+    "MUELLE_CARGA",
+    "MUELLES",
+    "MUELLE",
+    "DOCK",
+    "DOCKS",
+    "LOADING_DOCK",
     "MUROS",
     "MURO",
+    "VALLADO_PERIMETRAL",
+    "VALLA_PERIMETRAL",
+    "VALLADO",
+    "VALLA",
+    "FENCE",
     "PILARES",
+    "PILAR",
+    "COLUMNAS",
+    "COLUMNA",
+    "POSTES",
+    "POSTE",
+    "ESTRUCTURA",
     "OBSTACLES",
     "BUILDINGS",
     "CONSTRUCCIONES"
@@ -56,16 +75,26 @@ export const SUGGESTED_LAYERS = {
     "ACERA",
     "ISLETAS",
     "ISLETA",
+    "ISLAND",
+    "MEDIAN",
     "DELIMITACION",
     "CURBS",
     "BOUNDARIES",
+    "BORDES",
+    "VIAL_BORDE",
     "ROAD_EDGES"
   ],
   RESTRICTED: [
     "TURNSIM_ZONAS_RESTRINGIDAS",
     "TURNSIM_RESTRINGIDO",
     "ZONAS_RESTRINGIDAS",
+    "ZONA_RESTRINGIDA",
+    "ZONAS_PROHIBIDAS",
     "ZONA_PROHIBIDA",
+    "PEATONAL",
+    "PEATONES",
+    "PASILLO_PEATONAL",
+    "PEDESTRIAN",
     "RESTRINGIDO",
     "NO_PASAR",
     "RESTRICTED",
@@ -76,7 +105,7 @@ export const SUGGESTED_LAYERS = {
 /**
  * Parsea un archivo DXF ASCII y devuelve una estructura de entidades por capa y metadatos.
  * @param {string} dxfText Contenido del archivo DXF
- * @returns {object} { layers: string[], entities: Array, layerStats: object }
+ * @returns {object} { layers: string[], entities: Array, layerStats: object, insunits: number, suggestedScale: number }
  */
 export function parseDXF(dxfText) {
   if (typeof dxfText !== "string") {
@@ -96,8 +125,16 @@ export function parseDXF(dxfText) {
     return { code, value };
   }
 
+  function peekNextCode() {
+    if (idx >= nLines) return null;
+    return lines[idx].trim();
+  }
+
   const entities = [];
   const layerStats = {};
+  const blocks = {};
+  let insunits = 0;
+  let suggestedScale = 1.0;
 
   function registerLayer(layerName, entityType) {
     const l = layerName || "0";
@@ -108,214 +145,325 @@ export function parseDXF(dxfText) {
     layerStats[l].types[entityType] = (layerStats[l].types[entityType] || 0) + 1;
   }
 
-  // Avanzar hasta la sección ENTITIES
-  let inEntitiesSection = false;
-  while (idx < nLines) {
-    const pair = nextPair();
-    if (!pair) break;
-    if (pair.code === 0 && pair.value === "SECTION") {
-      const nextP = nextPair();
-      if (nextP && nextP.code === 2 && nextP.value === "ENTITIES") {
-        inEntitiesSection = true;
-        break;
+  function readEntity(entityType) {
+    if (entityType === "LINE") {
+      let layer = "0";
+      let x1 = 0, y1 = 0, x2 = 0, y2 = 0;
+      while (idx < nLines) {
+        if (peekNextCode() === "0") break;
+        const p = nextPair();
+        if (!p) break;
+        if (p.code === 8) layer = p.value;
+        else if (p.code === 10) x1 = parseFloat(p.value);
+        else if (p.code === 20) y1 = parseFloat(p.value);
+        else if (p.code === 11) x2 = parseFloat(p.value);
+        else if (p.code === 21) y2 = parseFloat(p.value);
       }
+      if (Number.isFinite(x1) && Number.isFinite(y1) && Number.isFinite(x2) && Number.isFinite(y2)) {
+        return {
+          type: "LINE",
+          layer,
+          vertices: [[x1, y1], [x2, y2]],
+          closed: false
+        };
+      }
+    } else if (entityType === "LWPOLYLINE") {
+      let layer = "0";
+      let isClosed = false;
+      const vertices = [];
+      let currX = null;
+      let currY = null;
+      let currBulge = 0;
+
+      while (idx < nLines) {
+        if (peekNextCode() === "0") break;
+        const p = nextPair();
+        if (!p) break;
+        if (p.code === 8) {
+          layer = p.value;
+        } else if (p.code === 70) {
+          const flag = parseInt(p.value, 10);
+          if ((flag & 1) === 1) isClosed = true;
+        } else if (p.code === 10) {
+          if (currX !== null && currY !== null) {
+            vertices.push({ x: currX, y: currY, bulge: currBulge });
+          }
+          currX = parseFloat(p.value);
+          currBulge = 0;
+        } else if (p.code === 20) {
+          currY = parseFloat(p.value);
+        } else if (p.code === 42) {
+          currBulge = parseFloat(p.value) || 0;
+        }
+      }
+      if (currX !== null && currY !== null) {
+        vertices.push({ x: currX, y: currY, bulge: currBulge });
+      }
+
+      if (vertices.length >= 2) {
+        const discretized = discretizeBulgePolyline(vertices, isClosed);
+        return {
+          type: "LWPOLYLINE",
+          layer,
+          rawVertices: vertices,
+          vertices: discretized,
+          closed: isClosed
+        };
+      }
+    } else if (entityType === "POLYLINE") {
+      let layer = "0";
+      let isClosed = false;
+      while (idx < nLines) {
+        if (peekNextCode() === "0") break;
+        const p = nextPair();
+        if (!p) break;
+        if (p.code === 8) layer = p.value;
+        else if (p.code === 70) {
+          if ((parseInt(p.value, 10) & 1) === 1) isClosed = true;
+        }
+      }
+
+      const vertices = [];
+      while (idx < nLines) {
+        const p0 = nextPair();
+        if (!p0) break;
+        if (p0.code === 0) {
+          if (p0.value === "SEQEND") break;
+          if (p0.value === "VERTEX") {
+            let vx = 0, vy = 0, bulge = 0;
+            while (idx < nLines) {
+              if (peekNextCode() === "0") break;
+              const vp = nextPair();
+              if (!vp) break;
+              if (vp.code === 10) vx = parseFloat(vp.value);
+              else if (vp.code === 20) vy = parseFloat(vp.value);
+              else if (vp.code === 42) bulge = parseFloat(vp.value) || 0;
+            }
+            vertices.push({ x: vx, y: vy, bulge });
+          }
+        }
+      }
+
+      if (vertices.length >= 2) {
+        const discretized = discretizeBulgePolyline(vertices, isClosed);
+        return {
+          type: "POLYLINE",
+          layer,
+          rawVertices: vertices,
+          vertices: discretized,
+          closed: isClosed
+        };
+      }
+    } else if (entityType === "CIRCLE") {
+      let layer = "0";
+      let cx = 0, cy = 0, r = 1;
+      while (idx < nLines) {
+        if (peekNextCode() === "0") break;
+        const p = nextPair();
+        if (!p) break;
+        if (p.code === 8) layer = p.value;
+        else if (p.code === 10) cx = parseFloat(p.value);
+        else if (p.code === 20) cy = parseFloat(p.value);
+        else if (p.code === 40) r = parseFloat(p.value);
+      }
+      if (Number.isFinite(cx) && Number.isFinite(cy) && Number.isFinite(r) && r > 0) {
+        const pts = [];
+        const segs = 36;
+        for (let s = 0; s < segs; s++) {
+          const ang = (2 * Math.PI * s) / segs;
+          pts.push([cx + r * Math.cos(ang), cy + r * Math.sin(ang)]);
+        }
+        return {
+          type: "CIRCLE",
+          layer,
+          cx,
+          cy,
+          r,
+          vertices: pts,
+          closed: true
+        };
+      }
+    } else if (entityType === "ARC") {
+      let layer = "0";
+      let cx = 0, cy = 0, r = 1, startAngDeg = 0, endAngDeg = 360;
+      while (idx < nLines) {
+        if (peekNextCode() === "0") break;
+        const p = nextPair();
+        if (!p) break;
+        if (p.code === 8) layer = p.value;
+        else if (p.code === 10) cx = parseFloat(p.value);
+        else if (p.code === 20) cy = parseFloat(p.value);
+        else if (p.code === 40) r = parseFloat(p.value);
+        else if (p.code === 50) startAngDeg = parseFloat(p.value);
+        else if (p.code === 51) endAngDeg = parseFloat(p.value);
+      }
+      if (Number.isFinite(cx) && Number.isFinite(cy) && Number.isFinite(r) && r > 0) {
+        let sRad = (startAngDeg * Math.PI) / 180;
+        let eRad = (endAngDeg * Math.PI) / 180;
+        if (eRad <= sRad) eRad += 2 * Math.PI;
+        const span = eRad - sRad;
+        const nSegs = Math.max(6, Math.ceil(span / (Math.PI / 18)));
+        const pts = [];
+        for (let k = 0; k <= nSegs; k++) {
+          const a = sRad + (span * k) / nSegs;
+          pts.push([cx + r * Math.cos(a), cy + r * Math.sin(a)]);
+        }
+        return {
+          type: "ARC",
+          layer,
+          cx,
+          cy,
+          r,
+          vertices: pts,
+          closed: false
+        };
+      }
+    } else if (entityType === "INSERT") {
+      let blockName = "";
+      let layer = "0";
+      let insX = 0, insY = 0;
+      let scaleX = 1.0, scaleY = 1.0;
+      let rotDeg = 0;
+
+      while (idx < nLines) {
+        if (peekNextCode() === "0") break;
+        const p = nextPair();
+        if (!p) break;
+        if (p.code === 2) blockName = p.value;
+        else if (p.code === 8) layer = p.value;
+        else if (p.code === 10) insX = parseFloat(p.value) || 0;
+        else if (p.code === 20) insY = parseFloat(p.value) || 0;
+        else if (p.code === 41) scaleX = parseFloat(p.value) || 1.0;
+        else if (p.code === 42) scaleY = parseFloat(p.value) || 1.0;
+        else if (p.code === 50) rotDeg = parseFloat(p.value) || 0;
+      }
+
+      return {
+        type: "INSERT",
+        blockName,
+        layer,
+        insX,
+        insY,
+        scaleX,
+        scaleY,
+        rotDeg
+      };
     }
+
+    // Otras entidades no geométricas o no soportadas: avanzar hasta próximo código 0
+    while (idx < nLines) {
+      if (peekNextCode() === "0") break;
+      nextPair();
+    }
+    return null;
   }
 
-  if (!inEntitiesSection) {
-    // Si no tiene sección formal de ENTITIES, intentar leer entidades desde el inicio
-    idx = 0;
-  }
-
+  // Recorrido de secciones DXF (HEADER, BLOCKS, ENTITIES)
   while (idx < nLines) {
     const pair = nextPair();
     if (!pair) break;
 
-    if (pair.code === 0) {
-      if (pair.value === "ENDSEC" || pair.value === "EOF") {
-        if (inEntitiesSection) break;
-        continue;
-      }
+    if (pair.code === 0 && pair.value === "SECTION") {
+      const secPair = nextPair();
+      const secName = secPair?.code === 2 ? secPair.value : "";
 
-      const entityType = pair.value;
-
-      if (entityType === "LINE") {
-        let layer = "0";
-        let x1 = 0, y1 = 0, x2 = 0, y2 = 0;
+      if (secName === "HEADER") {
         while (idx < nLines) {
-          if (lines[idx].trim() === "0") break;
-          const p = nextPair();
-          if (!p) break;
-          if (p.code === 8) layer = p.value;
-          else if (p.code === 10) x1 = parseFloat(p.value);
-          else if (p.code === 20) y1 = parseFloat(p.value);
-          else if (p.code === 11) x2 = parseFloat(p.value);
-          else if (p.code === 21) y2 = parseFloat(p.value);
-        }
-        if (Number.isFinite(x1) && Number.isFinite(y1) && Number.isFinite(x2) && Number.isFinite(y2)) {
-          registerLayer(layer, "LINE");
-          entities.push({
-            type: "LINE",
-            layer,
-            vertices: [[x1, y1], [x2, y2]],
-            closed: false
-          });
-        }
-      } else if (entityType === "LWPOLYLINE") {
-        let layer = "0";
-        let isClosed = false;
-        const vertices = [];
-        let currX = null;
-        let currY = null;
-        let currBulge = 0;
-
-        while (idx < nLines) {
-          if (lines[idx].trim() === "0") break;
-          const p = nextPair();
-          if (!p) break;
-          if (p.code === 8) {
-            layer = p.value;
-          } else if (p.code === 70) {
-            const flag = parseInt(p.value, 10);
-            if ((flag & 1) === 1) isClosed = true;
-          } else if (p.code === 10) {
-            if (currX !== null && currY !== null) {
-              vertices.push({ x: currX, y: currY, bulge: currBulge });
+          const hp = nextPair();
+          if (!hp) break;
+          if (hp.code === 0 && hp.value === "ENDSEC") break;
+          if (hp.code === 9 && hp.value === "$INSUNITS") {
+            const vp = nextPair();
+            if (vp && vp.code === 70) {
+              insunits = parseInt(vp.value, 10) || 0;
+              if (insunits === 1) suggestedScale = 0.0254; // Pulgadas a metros
+              else if (insunits === 2) suggestedScale = 0.3048; // Pies a metros
+              else if (insunits === 4) suggestedScale = 0.001; // Milímetros a metros
+              else if (insunits === 5) suggestedScale = 0.01; // Centímetros a metros
+              else if (insunits === 6) suggestedScale = 1.0; // Metros
             }
-            currX = parseFloat(p.value);
-            currBulge = 0;
-          } else if (p.code === 20) {
-            currY = parseFloat(p.value);
-          } else if (p.code === 42) {
-            currBulge = parseFloat(p.value) || 0;
           }
         }
-        if (currX !== null && currY !== null) {
-          vertices.push({ x: currX, y: currY, bulge: currBulge });
-        }
-
-        if (vertices.length >= 2) {
-          registerLayer(layer, "LWPOLYLINE");
-          const discretized = discretizeBulgePolyline(vertices, isClosed);
-          entities.push({
-            type: "LWPOLYLINE",
-            layer,
-            rawVertices: vertices,
-            vertices: discretized,
-            closed: isClosed
-          });
-        }
-      } else if (entityType === "POLYLINE") {
-        let layer = "0";
-        let isClosed = false;
+      } else if (secName === "BLOCKS") {
         while (idx < nLines) {
-          if (lines[idx].trim() === "0") break;
-          const p = nextPair();
-          if (!p) break;
-          if (p.code === 8) layer = p.value;
-          else if (p.code === 70) {
-            if ((parseInt(p.value, 10) & 1) === 1) isClosed = true;
-          }
-        }
+          const bp = nextPair();
+          if (!bp) break;
+          if (bp.code === 0 && bp.value === "ENDSEC") break;
 
-        const vertices = [];
-        // Leer subsecuencia de VERTEX hasta SEQEND
-        while (idx < nLines) {
-          const p0 = nextPair();
-          if (!p0) break;
-          if (p0.code === 0) {
-            if (p0.value === "SEQEND") break;
-            if (p0.value === "VERTEX") {
-              let vx = 0, vy = 0, bulge = 0;
-              while (idx < nLines) {
-                if (lines[idx].trim() === "0") break;
-                const vp = nextPair();
-                if (!vp) break;
-                if (vp.code === 10) vx = parseFloat(vp.value);
-                else if (vp.code === 20) vy = parseFloat(vp.value);
-                else if (vp.code === 42) bulge = parseFloat(vp.value) || 0;
+          if (bp.code === 0 && bp.value === "BLOCK") {
+            let bName = "";
+            let bBaseX = 0, bBaseY = 0;
+            while (idx < nLines) {
+              if (peekNextCode() === "0") break;
+              const bpChild = nextPair();
+              if (!bpChild) break;
+              if (bpChild.code === 2) bName = bpChild.value;
+              else if (bpChild.code === 10) bBaseX = parseFloat(bpChild.value) || 0;
+              else if (bpChild.code === 20) bBaseY = parseFloat(bpChild.value) || 0;
+            }
+
+            const blockEntities = [];
+            while (idx < nLines) {
+              const bEntHeader = nextPair();
+              if (!bEntHeader) break;
+              if (bEntHeader.code === 0 && bEntHeader.value === "ENDBLK") break;
+              if (bEntHeader.code === 0) {
+                const subEnt = readEntity(bEntHeader.value);
+                if (subEnt) blockEntities.push(subEnt);
               }
-              vertices.push({ x: vx, y: vy, bulge });
+            }
+
+            if (bName) {
+              blocks[bName] = {
+                name: bName,
+                base: [bBaseX, bBaseY],
+                entities: blockEntities
+              };
             }
           }
         }
+      } else if (secName === "ENTITIES") {
+        while (idx < nLines) {
+          const ep = nextPair();
+          if (!ep) break;
+          if (ep.code === 0) {
+            if (ep.value === "ENDSEC" || ep.value === "EOF") break;
+            const ent = readEntity(ep.value);
+            if (ent) {
+              if (ent.type === "INSERT") {
+                const blk = blocks[ent.blockName];
+                registerLayer(ent.layer, "INSERT");
+                if (blk && blk.entities.length > 0) {
+                  const rad = (ent.rotDeg * Math.PI) / 180;
+                  const cosR = Math.cos(rad);
+                  const sinR = Math.sin(rad);
 
-        if (vertices.length >= 2) {
-          registerLayer(layer, "POLYLINE");
-          const discretized = discretizeBulgePolyline(vertices, isClosed);
-          entities.push({
-            type: "POLYLINE",
-            layer,
-            rawVertices: vertices,
-            vertices: discretized,
-            closed: isClosed
-          });
-        }
-      } else if (entityType === "CIRCLE") {
-        let layer = "0";
-        let cx = 0, cy = 0, r = 1;
-        while (idx < nLines) {
-          if (lines[idx].trim() === "0") break;
-          const p = nextPair();
-          if (!p) break;
-          if (p.code === 8) layer = p.value;
-          else if (p.code === 10) cx = parseFloat(p.value);
-          else if (p.code === 20) cy = parseFloat(p.value);
-          else if (p.code === 40) r = parseFloat(p.value);
-        }
-        if (Number.isFinite(cx) && Number.isFinite(cy) && Number.isFinite(r) && r > 0) {
-          registerLayer(layer, "CIRCLE");
-          const pts = [];
-          const segs = 36;
-          for (let s = 0; s < segs; s++) {
-            const ang = (2 * Math.PI * s) / segs;
-            pts.push([cx + r * Math.cos(ang), cy + r * Math.sin(ang)]);
+                  for (const child of blk.entities) {
+                    const finalLayer = child.layer === "0" || !child.layer ? ent.layer : child.layer;
+                    registerLayer(finalLayer, child.type);
+
+                    const transformedVertices = (child.vertices || []).map(([vx, vy]) => {
+                      const relX = (vx - blk.base[0]) * ent.scaleX;
+                      const relY = (vy - blk.base[1]) * ent.scaleY;
+                      const gx = ent.insX + relX * cosR - relY * sinR;
+                      const gy = ent.insY + relX * sinR + relY * cosR;
+                      return [gx, gy];
+                    });
+
+                    entities.push({
+                      type: child.type,
+                      layer: finalLayer,
+                      vertices: transformedVertices,
+                      closed: Boolean(child.closed)
+                    });
+                  }
+                }
+              } else {
+                registerLayer(ent.layer, ent.type);
+                entities.push(ent);
+              }
+            }
           }
-          entities.push({
-            type: "CIRCLE",
-            layer,
-            cx,
-            cy,
-            r,
-            vertices: pts,
-            closed: true
-          });
-        }
-      } else if (entityType === "ARC") {
-        let layer = "0";
-        let cx = 0, cy = 0, r = 1, startAngDeg = 0, endAngDeg = 360;
-        while (idx < nLines) {
-          if (lines[idx].trim() === "0") break;
-          const p = nextPair();
-          if (!p) break;
-          if (p.code === 8) layer = p.value;
-          else if (p.code === 10) cx = parseFloat(p.value);
-          else if (p.code === 20) cy = parseFloat(p.value);
-          else if (p.code === 40) r = parseFloat(p.value);
-          else if (p.code === 50) startAngDeg = parseFloat(p.value);
-          else if (p.code === 51) endAngDeg = parseFloat(p.value);
-        }
-        if (Number.isFinite(cx) && Number.isFinite(cy) && Number.isFinite(r) && r > 0) {
-          registerLayer(layer, "ARC");
-          let sRad = (startAngDeg * Math.PI) / 180;
-          let eRad = (endAngDeg * Math.PI) / 180;
-          if (eRad <= sRad) eRad += 2 * Math.PI;
-          const span = eRad - sRad;
-          const nSegs = Math.max(6, Math.ceil(span / (Math.PI / 18)));
-          const pts = [];
-          for (let k = 0; k <= nSegs; k++) {
-            const a = sRad + (span * k) / nSegs;
-            pts.push([cx + r * Math.cos(a), cy + r * Math.sin(a)]);
-          }
-          entities.push({
-            type: "ARC",
-            layer,
-            cx,
-            cy,
-            r,
-            vertices: pts,
-            closed: false
-          });
         }
       }
     }
@@ -326,7 +474,10 @@ export function parseDXF(dxfText) {
   return {
     layers: layerNames,
     layerStats,
-    entities
+    entities,
+    insunits,
+    suggestedScale,
+    blocks
   };
 }
 
@@ -602,6 +753,8 @@ export function convertPolylineToManeuver(vertices, options = {}) {
 export function buildScenarioFromDXF(parsedDxf, mapping, options = {}) {
   const { trajectoryLayer, obstacleLayers = [], boundaryLayers = [], restrictedLayers = [] } = mapping;
   const entities = parsedDxf.entities || [];
+  const scale = Number(options.scale || 1.0);
+  const applyScale = scale !== 1.0 && Number.isFinite(scale) && scale > 0;
 
   let trajectoryEntity = null;
   const obstacles = [];
@@ -619,8 +772,13 @@ export function buildScenarioFromDXF(parsedDxf, mapping, options = {}) {
 
   let obsCounter = 1;
 
-  for (const ent of entities) {
-    if (!ent.vertices || ent.vertices.length < 2) continue;
+  for (const rawEnt of entities) {
+    if (!rawEnt.vertices || rawEnt.vertices.length < 2) continue;
+    const vertices = applyScale
+      ? rawEnt.vertices.map(([vx, vy]) => [vx * scale, vy * scale])
+      : rawEnt.vertices;
+    const ent = { ...rawEnt, vertices };
+
     updateBounds(ent.vertices);
 
     if (trajectoryLayer && ent.layer === trajectoryLayer && !trajectoryEntity) {
@@ -668,9 +826,46 @@ export function buildScenarioFromDXF(parsedDxf, mapping, options = {}) {
     }
   }
 
+  // Traslación automática a origen local para coordenadas geodésicas / UTM (MATH-02)
+  // Si las coordenadas son grandes (|X| o |Y| > 5.000 m), se resta el centroide local redondeado
+  // para conservar 53 bits completos de mantisa en coma flotante y evitar desbordamientos en Clipper.
+  let originOffset = options.originOffset || null;
+  if (!originOffset && options.autoLocalOrigin !== false && Number.isFinite(minX) && (Math.abs(minX) > 5000 || Math.abs(minY) > 5000)) {
+    originOffset = {
+      x: Math.round((minX + maxX) / 2),
+      y: Math.round((minY + maxY) / 2)
+    };
+  }
+
+  if (originOffset && (originOffset.x !== 0 || originOffset.y !== 0)) {
+    const ox = originOffset.x;
+    const oy = originOffset.y;
+
+    if (trajectoryEntity && trajectoryEntity.vertices) {
+      trajectoryEntity.vertices = trajectoryEntity.vertices.map(([vx, vy]) => [vx - ox, vy - oy]);
+    }
+    for (const obs of obstacles) {
+      if (obs.vertices) {
+        obs.vertices = obs.vertices.map(([vx, vy]) => [vx - ox, vy - oy]);
+      }
+    }
+    for (const bg of backgroundEntities) {
+      if (bg.vertices) {
+        bg.vertices = bg.vertices.map(([vx, vy]) => [vx - ox, vy - oy]);
+      }
+    }
+    minX -= ox;
+    maxX -= ox;
+    minY -= oy;
+    maxY -= oy;
+  }
+
   let maneuver = null;
   if (trajectoryEntity) {
     maneuver = convertPolylineToManeuver(trajectoryEntity.vertices, options);
+    if (originOffset) {
+      maneuver.originOffset = originOffset;
+    }
   }
 
   const bounds = Number.isFinite(minX) ? { minX, minY, maxX, maxY } : null;
@@ -680,6 +875,7 @@ export function buildScenarioFromDXF(parsedDxf, mapping, options = {}) {
     obstacles,
     backgroundEntities,
     bounds,
-    trajectoryEntity
+    trajectoryEntity,
+    originOffset
   };
 }

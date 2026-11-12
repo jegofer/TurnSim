@@ -13,7 +13,7 @@ import {
   computeDerivedVehicleMetrics,
   validateVehicleParams
 } from "./models/vehicles.js";
-import { buildSegmentsFromWaypoints } from "./engine/kinematics.js";
+import { buildSegmentsFromWaypoints, buildSegmentsFromSplineWaypoints, sampleCatmullRomSpline } from "./engine/kinematics.js";
 import { buildCompleteSimulationResult } from "./engine/envelope.js";
 import {
   PRESET_SCENARIOS,
@@ -24,6 +24,7 @@ import {
   generateDXFContent,
   openStructuredTechnicalReport,
   exportGraphicViewSnapshot,
+  downloadMarkdownTechnicalReport,
   downloadTextFile
 } from "./export/exporters.js";
 import {
@@ -31,23 +32,95 @@ import {
   detectSuggestedLayerMapping,
   buildScenarioFromDXF
 } from "./export/dxf_importer.js";
+import { buildScenarioFromGeoJSON } from "./export/geojson_importer.js";
 import { Viewer2D } from "./view2d/viewer2d.js";
 import { Viewer3D } from "./view3d/viewer3d.js";
+import { I18nManager } from "./i18n/locales.js";
+import { EngineWorkerClient } from "./engine/worker_client.js";
+
+function escapeHTML(str) {
+  return String(str ?? "")
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
+}
+
+/**
+ * Pila acotada de historial para comandos Deshacer / Rehacer (UX-07)
+ */
+export class CommandHistory {
+  constructor(maxStates = 30) {
+    this.maxStates = maxStates;
+    this.stack = [];
+    this.index = -1;
+  }
+
+  pushState(snapshot) {
+    if (this.index < this.stack.length - 1) {
+      this.stack = this.stack.slice(0, this.index + 1);
+    }
+    this.stack.push(JSON.stringify(snapshot));
+    if (this.stack.length > this.maxStates) {
+      this.stack.shift();
+    } else {
+      this.index++;
+    }
+  }
+
+  canUndo() {
+    return this.index > 0;
+  }
+
+  canRedo() {
+    return this.index < this.stack.length - 1;
+  }
+
+  undo() {
+    if (!this.canUndo()) return null;
+    this.index--;
+    return JSON.parse(this.stack[this.index]);
+  }
+
+  redo() {
+    if (!this.canRedo()) return null;
+    this.index++;
+    return JSON.parse(this.stack[this.index]);
+  }
+}
 
 export class SweptPathApp {
   constructor() {
+    // Gestor de internacionalización i18n (SEO-05)
+    this.i18n = new I18nManager();
+
+    // Cliente de cálculo en segundo plano Web Worker con repliegue síncrono (PERF-06)
+    this.workerClient = new EngineWorkerClient();
+
+    // Historial acotado a 30 estados para Deshacer / Rehacer (UX-07)
+    this.history = new CommandHistory(30);
+    this._autosaveTimer = null;
+    this.isCurvesPanelOpen = false;
+
     // Estado activo
     this.selectedVehicleId = "renault_t_4x2_sko";
     this.selectedTractorKey = "renault_t_480";
     this.selectedTrailerKey = "schmitz_sko_cool";
     this.vehicle = cloneVehicleProfile(this.selectedVehicleId);
     this.isCustomModified = false;
+    this.trajectoryMode = "spline"; // 'spline' (Spline CAD continua) | 'fillet' (Polilínea con acuerdos)
 
-    this.selectedScenarioId = "industrial_turn_90";
-    const defaultScenario = PRESET_SCENARIOS[this.selectedScenarioId];
-    this.safetyMarginM = defaultScenario.safetyMarginM;
-    this.maneuver = JSON.parse(JSON.stringify(defaultScenario.maneuver));
-    this.obstacles = JSON.parse(JSON.stringify(defaultScenario.obstacles));
+    // Inicialización con visor vacío hasta que el usuario dibuje una ruta o cargue un plano CAD
+    this.selectedScenarioId = "";
+    this.safetyMarginM = 0.50;
+    this.maneuver = {
+      startPose: { x: 0, y: 0, headingDeg: 0, initialArticulationDeg: 0 },
+      segments: []
+    };
+    this.obstacles = [];
+    this.cadBackgroundEntities = [];
+    this.currentParsedDXF = null;
 
     this.discretization = {
       straightStepM: 0.15,
@@ -61,11 +134,15 @@ export class SweptPathApp {
     this.cadBackgroundEntities = [];
     this.currentParsedDXF = null;
 
-    // Estado de reproducción
+    // Estado de reproducción y temporizadores de recálculo
     this.isPlaying = false;
     this.playSpeed = 1.0;
     this.currentFrameFloat = 0;
+    this.currentAnimDistM = 0;
     this.lastAnimTime = 0;
+    this._animRafId = null;
+    this._recomputeTimer = null;
+    this._interferenceTimer = null;
 
     // Instancias de visores
     const canvas2D = document.getElementById("canvas-2d");
@@ -74,14 +151,627 @@ export class SweptPathApp {
     this.viewer3D = new Viewer3D(container3D);
 
     // Callback cuando el usuario arrastra un obstáculo con Shift+Click en el visor 2D
-    this.viewer2D.onObstacleMoved = () => {
+    this.viewer2D.onObstacleMoved = (movedObs) => {
       this._recomputeInterferencesOnly();
+      this._syncObstacleCardDOM(movedObs);
+    };
+    this.viewer2D.onObstacleDragEnd = () => {
       this._renderObstaclesListUI();
+      this.history.pushState(this.getSnapshot());
+      this._updateUndoRedoButtonsUI();
+    };
+
+    // Callbacks para trazado y edición de waypoints interactivos (UX-04)
+    this.viewer2D.onWaypointsChange = (pts) => {
+      const txtEl = document.getElementById("inp-waypoints-text");
+      if (!pts || pts.length === 0) {
+        if (txtEl) txtEl.value = "";
+        this.maneuver.segments = [];
+        this._populateManeuverInputs();
+        this._renderSegmentsListUI();
+        this.scheduleRecompute(60, false);
+        return;
+      }
+      if (txtEl) {
+        txtEl.value = pts
+          .map((p) => {
+            const px = Array.isArray(p) ? p[0] : (p?.x ?? 0);
+            const py = Array.isArray(p) ? p[1] : (p?.y ?? 0);
+            return `${Number(px).toFixed(2)} ${Number(py).toFixed(2)}`;
+          })
+          .join("\n");
+      }
+
+      if (pts.length === 1) {
+        const p0 = pts[0];
+        const px = Array.isArray(p0) ? p0[0] : (p0?.x ?? 0);
+        const py = Array.isArray(p0) ? p0[1] : (p0?.y ?? 0);
+        this.maneuver.startPose = {
+          ...this.maneuver.startPose,
+          x: Number(px.toFixed(3)),
+          y: Number(py.toFixed(3))
+        };
+        this.maneuver.segments = [];
+        this._populateManeuverInputs();
+        this._renderSegmentsListUI();
+        this.scheduleRecompute(60, false);
+        return;
+      }
+
+      const filletR = parseFloat(document.getElementById("inp-waypoints-radius")?.value) || 12.5;
+      const dir = parseInt(document.getElementById("sel-waypoints-dir")?.value, 10) || 1;
+      const mode = document.getElementById("sel-waypoints-mode")?.value || this.trajectoryMode || "spline";
+      const built = buildSegmentsFromWaypoints(pts, filletR, dir, { mode, vehicle: this.vehicle });
+      this.maneuver.startPose = {
+        ...this.maneuver.startPose,
+        ...built.startPose
+      };
+      this.maneuver.segments = built.segments;
+      this._populateManeuverInputs();
+      this._renderSegmentsListUI();
+      this.history.pushState(this.getSnapshot());
+      this._updateUndoRedoButtonsUI();
+      this.scheduleRecompute(60, false);
     };
 
     this._initUI();
+    this.history.pushState(this.getSnapshot());
+    this._updateUndoRedoButtonsUI();
     this.recomputeAll(true);
-    this._startAnimationLoop();
+    this._checkAutosaveRecovery();
+  }
+
+  _setComputingStatus(computing) {
+    this.isComputing = computing;
+    if (this.viewer2D) {
+      this.viewer2D.isComputing = computing;
+      if (!this.simResult) this.viewer2D.render();
+    }
+    const indicator = document.getElementById("calculating-indicator");
+    if (indicator) {
+      indicator.style.display = computing ? "flex" : "none";
+    }
+    const badge = document.getElementById("global-interference-badge");
+    if (badge && computing) {
+      badge.className = "status-banner-pill status-COMPUTING";
+      badge.textContent = "⏳ CALCULANDO TRAYECTORIA...";
+    }
+  }
+
+  scheduleRecompute(delayMs = 120, fitCamera = false) {
+    if (this._recomputeTimer) clearTimeout(this._recomputeTimer);
+    if (this.maneuver && this.maneuver.segments && this.maneuver.segments.length > 0) {
+      this._setComputingStatus(true);
+    }
+    this._recomputeTimer = setTimeout(() => {
+      this._recomputeTimer = null;
+      this.recomputeAll(fitCamera);
+    }, delayMs);
+  }
+
+  scheduleInterferencesRecompute(delayMs = 50) {
+    if (this._interferenceTimer) clearTimeout(this._interferenceTimer);
+    this._interferenceTimer = setTimeout(() => {
+      this._interferenceTimer = null;
+      this._recomputeInterferencesOnly();
+    }, delayMs);
+  }
+
+  getSnapshot() {
+    return {
+      vehicle: JSON.parse(JSON.stringify(this.vehicle)),
+      selectedVehicleId: this.selectedVehicleId,
+      selectedTractorKey: this.selectedTractorKey,
+      selectedTrailerKey: this.selectedTrailerKey,
+      selectedScenarioId: this.selectedScenarioId,
+      maneuver: JSON.parse(JSON.stringify(this.maneuver)),
+      obstacles: JSON.parse(JSON.stringify(this.obstacles)),
+      safetyMarginM: this.safetyMarginM,
+      discretization: JSON.parse(JSON.stringify(this.discretization))
+    };
+  }
+
+  restoreSnapshot(s) {
+    if (!s) return;
+    this.vehicle = JSON.parse(JSON.stringify(s.vehicle));
+    this.selectedVehicleId = s.selectedVehicleId || "custom";
+    this.selectedTractorKey = s.selectedTractorKey || (s.vehicle?.tractorKey || "renault_t_480");
+    this.selectedTrailerKey = s.selectedTrailerKey || (s.vehicle?.trailerKey || "schmitz_sko_cool");
+    this.selectedScenarioId = s.selectedScenarioId || this.selectedScenarioId;
+    this.maneuver = JSON.parse(JSON.stringify(s.maneuver));
+    this.obstacles = JSON.parse(JSON.stringify(s.obstacles));
+    this.safetyMarginM = typeof s.safetyMarginM === "number" ? s.safetyMarginM : 0.30;
+    if (s.discretization) {
+      this.discretization = { ...this.discretization, ...s.discretization };
+    }
+
+    const vehSel = document.getElementById("select-vehicle");
+    if (vehSel) vehSel.value = this.selectedVehicleId;
+    const trSel = document.getElementById("select-tractor");
+    if (trSel) trSel.value = this.selectedTractorKey;
+    const tlSel = document.getElementById("select-trailer");
+    if (tlSel) tlSel.value = this.selectedTrailerKey;
+    const scSel = document.getElementById("select-scenario");
+    if (scSel) scSel.value = this.selectedScenarioId;
+    const smInp = document.getElementById("inp-safety-margin");
+    if (smInp) smInp.value = this.safetyMarginM;
+
+    this._populateVehicleInputs();
+    this._populateManeuverInputs();
+    this._renderObstaclesListUI();
+    this.recomputeAll(false);
+  }
+
+  undo() {
+    const prevState = this.history.undo();
+    if (prevState) {
+      this.restoreSnapshot(prevState);
+      this._updateUndoRedoButtonsUI();
+      this.showToast(this.i18n.t("toast_undo"), "info");
+    }
+  }
+
+  redo() {
+    const nextState = this.history.redo();
+    if (nextState) {
+      this.restoreSnapshot(nextState);
+      this._updateUndoRedoButtonsUI();
+      this.showToast(this.i18n.t("toast_redo"), "info");
+    }
+  }
+
+  _updateUndoRedoButtonsUI() {
+    const btnUndo = document.getElementById("btn-undo");
+    const btnRedo = document.getElementById("btn-redo");
+    if (btnUndo) btnUndo.disabled = !this.history.canUndo();
+    if (btnRedo) btnRedo.disabled = !this.history.canRedo();
+  }
+
+  exportSessionJSON() {
+    const sessionData = {
+      turnsim_version: "1.0.0",
+      application: "TurnSim / Open Swept Path Analyzer (OSPA)",
+      timestamp: new Date().toISOString(),
+      vehicle: this.vehicle,
+      selectedVehicleId: this.selectedVehicleId,
+      selectedTractorKey: this.selectedTractorKey,
+      selectedTrailerKey: this.selectedTrailerKey,
+      maneuver: this.maneuver,
+      obstacles: this.obstacles,
+      safetyMarginM: this.safetyMarginM,
+      discretization: this.discretization,
+      viewMode: this.viewMode,
+      pnoaConfig: {
+        enabled: Boolean(this.viewer2D?.layers?.pnoa && this.viewer2D?.pnoaConfig?.enabled),
+        opacity: this.viewer2D?.pnoaConfig?.opacity,
+        centerLat: this.viewer2D?.pnoaConfig?.centerLat,
+        centerLon: this.viewer2D?.pnoaConfig?.centerLon,
+        utmZone: this.viewer2D?.pnoaConfig?.utmZone,
+        anchorWorldX: this.viewer2D?.pnoaConfig?.anchorWorldX,
+        anchorWorldY: this.viewer2D?.pnoaConfig?.anchorWorldY
+      }
+    };
+    const jsonStr = JSON.stringify(sessionData, null, 2);
+    const dateStr = new Date().toISOString().slice(0, 10);
+    downloadTextFile(`TurnSim_Proyecto_${dateStr}.turnsim.json`, jsonStr, "application/json;charset=utf-8");
+    this.showToast(this.i18n.t("toast_session_saved"), "success");
+  }
+
+  importSessionJSON(file) {
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = (e) => {
+      try {
+        const data = JSON.parse(e.target.result);
+        if (!data.vehicle || !data.maneuver) {
+          throw new Error("El archivo no presenta la estructura requerida de proyecto TurnSim.");
+        }
+        this.vehicle = data.vehicle;
+        this.selectedVehicleId = data.selectedVehicleId || "custom";
+        this.selectedTractorKey = data.selectedTractorKey || (data.vehicle.tractorKey || "renault_t_480");
+        this.selectedTrailerKey = data.selectedTrailerKey || (data.vehicle.trailerKey || "schmitz_sko_cool");
+        this.maneuver = data.maneuver;
+        if (Array.isArray(data.obstacles)) {
+          this.obstacles = data.obstacles;
+        }
+        if (typeof data.safetyMarginM === "number") {
+          this.safetyMarginM = data.safetyMarginM;
+        }
+        if (data.discretization) {
+          this.discretization = { ...this.discretization, ...data.discretization };
+        }
+        if (data.pnoaConfig && typeof data.pnoaConfig === "object") {
+          this.viewer2D.setPnoaConfig(data.pnoaConfig);
+          const chkLayerPnoa = document.getElementById("chk-layer-pnoa");
+          if (chkLayerPnoa) chkLayerPnoa.checked = Boolean(data.pnoaConfig.enabled);
+          const btnTogglePnoa = document.getElementById("btn-toggle-pnoa");
+          if (btnTogglePnoa) {
+            btnTogglePnoa.classList.toggle("active", Boolean(data.pnoaConfig.enabled));
+          }
+        }
+        this._populateVehicleInputs();
+        this._populateManeuverInputs();
+        this._renderObstaclesListUI();
+        this.history.pushState(this.getSnapshot());
+        this._updateUndoRedoButtonsUI();
+        this.recomputeAll(true);
+        this.showToast(this.i18n.t("toast_session_loaded"), "success");
+      } catch (err) {
+        this.showToast(`Error al cargar proyecto: ${err.message}`, "danger");
+      }
+    };
+    reader.readAsText(file);
+  }
+
+  _scheduleAutosave() {
+    if (this._autosaveTimer) clearTimeout(this._autosaveTimer);
+    this._autosaveTimer = setTimeout(() => {
+      try {
+        if (typeof localStorage === "undefined") return;
+        const autosaveData = {
+          timestamp: new Date().toISOString(),
+          snapshot: this.getSnapshot()
+        };
+        localStorage.setItem("turnsim_session_autosave", JSON.stringify(autosaveData));
+      } catch (_) {}
+    }, 1500);
+  }
+
+  _checkAutosaveRecovery() {
+    try {
+      if (typeof localStorage === "undefined") return;
+      const raw = localStorage.getItem("turnsim_session_autosave");
+      if (!raw) return;
+      const autosave = JSON.parse(raw);
+      if (!autosave || !autosave.snapshot || !autosave.timestamp) return;
+
+      const banner = document.getElementById("autosave-banner");
+      if (banner) {
+        banner.style.display = "flex";
+        const dateObj = new Date(autosave.timestamp);
+        const timeStr = dateObj.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+        const txt = banner.querySelector(".autosave-text");
+        if (txt) {
+          txt.textContent = `💾 Sesión previa guardada detectada (${timeStr}). ¿Desea recuperarla?`;
+        }
+        const btnRestore = document.getElementById("btn-restore-autosave");
+        if (btnRestore) {
+          btnRestore.onclick = () => {
+            this.restoreSnapshot(autosave.snapshot);
+            banner.style.display = "none";
+            this.showToast(this.i18n.t("toast_autosave_restored"), "success");
+          };
+        }
+        const btnDismiss = document.getElementById("btn-dismiss-autosave");
+        if (btnDismiss) {
+          btnDismiss.onclick = () => {
+            banner.style.display = "none";
+          };
+        }
+      }
+    } catch (_) {}
+  }
+
+  toggleCurvesPanel(force) {
+    const panel = document.getElementById("panel-pk-curves");
+    const btn = document.getElementById("btn-toggle-curves");
+    if (!panel) return;
+    const isCurrentlyOpen = !panel.classList.contains("collapsed");
+    const nextOpen = typeof force === "boolean" ? force : !isCurrentlyOpen;
+    panel.classList.toggle("collapsed", !nextOpen);
+    this.isCurvesPanelOpen = nextOpen;
+    if (btn) {
+      btn.classList.toggle("active", nextOpen);
+      btn.textContent = nextOpen ? "📈 Ocultar telemetría" : "📈 Curvas de telemetría";
+    }
+    if (nextOpen) {
+      this._renderPKCurves();
+    }
+  }
+
+  _renderPKCurves() {
+    const container = document.getElementById("pk-curves-svg-container");
+    if (!container) return;
+
+    if (!this.simResult || !this.simResult.states || !this.simResult.states.length) {
+      container.innerHTML = `
+        <div style="display:flex;align-items:center;justify-content:center;height:100%;color:#94a3b8;font-size:12px;font-style:italic;padding:12px;text-align:center;">
+          ℹ️ Defina o trace una maniobra para visualizar las curvas de telemetría de dirección y articulación.
+        </div>`;
+      return;
+    }
+
+    const states = this.simResult.states;
+    const getStateDist = (s) => (typeof s.distAlongPathM === "number" ? s.distAlongPathM : (typeof s.dist === "number" ? s.dist : 0));
+    const lastDist = getStateDist(states[states.length - 1]);
+    const totalDist = Math.max(0.01, this.simResult.summary?.totalDistanceM || lastDist || 1);
+    const hasTrailer = Boolean(this.vehicle && this.vehicle.hasTrailer);
+
+    // Ajustar visibilidad de la leyenda de articulación si el vehículo es rígido o articulado
+    const legendArticEl = document.getElementById("pk-legend-artic-item") || document.querySelector(".pk-legend-item:has(.pk-legend-artic)");
+    if (legendArticEl) {
+      legendArticEl.style.display = hasTrailer ? "flex" : "none";
+    }
+
+    const W = 1000;
+    const H = 120;
+    const padL = 50;
+    const padR = 25;
+    const padT = 15;
+    const padB = 25;
+
+    const plotW = W - padL - padR;
+    const plotH = H - padT - padB;
+
+    let maxAngle = 45;
+    for (const s of states) {
+      if (Math.abs(s.steerAngleDeg) > maxAngle) maxAngle = Math.ceil(Math.abs(s.steerAngleDeg) / 5) * 5;
+      if (hasTrailer && Math.abs(s.articulationAngleDeg) > maxAngle) maxAngle = Math.ceil(Math.abs(s.articulationAngleDeg) / 5) * 5;
+    }
+    maxAngle = Math.max(30, Math.min(85, maxAngle));
+
+    const scaleX = (dist) => padL + (dist / totalDist) * plotW;
+    const scaleY = (angle) => padT + plotH / 2 - (angle / maxAngle) * (plotH / 2);
+
+    let gridSvg = `<line x1="${padL}" y1="${padT + plotH / 2}" x2="${padL + plotW}" y2="${padT + plotH / 2}" stroke="#334155" stroke-dasharray="4 3" stroke-width="1" />`;
+    gridSvg += `<line x1="${padL}" y1="${padT}" x2="${padL}" y2="${padT + plotH}" stroke="#475569" stroke-width="1.2" />`;
+    gridSvg += `<line x1="${padL}" y1="${padT + plotH}" x2="${padL + plotW}" y2="${padT + plotH}" stroke="#475569" stroke-width="1.2" />`;
+
+    // Rótulos de ejes en español técnico
+    gridSvg += `<text x="${padL}" y="${padT - 4}" fill="#38bdf8" font-size="9" text-anchor="start" font-weight="600">Ángulo (°)</text>`;
+    gridSvg += `<text x="${padL + plotW}" y="${padT + plotH + 18}" fill="#94a3b8" font-size="9" text-anchor="end">PK / Distancia s (m)</text>`;
+
+    const yTicks = [-maxAngle, -maxAngle / 2, 0, maxAngle / 2, maxAngle];
+    for (const yt of yTicks) {
+      const y = scaleY(yt);
+      gridSvg += `<text x="${padL - 6}" y="${y + 3.5}" fill="#94a3b8" font-size="9" text-anchor="end" font-family="monospace">${yt.toFixed(0)}°</text>`;
+      if (yt !== 0) {
+        gridSvg += `<line x1="${padL}" y1="${y}" x2="${padL + plotW}" y2="${y}" stroke="#1e293b" stroke-width="1" />`;
+      }
+    }
+
+    const xStep = totalDist > 40 ? 10 : 5;
+    for (let d = 0; d <= totalDist; d += xStep) {
+      const x = scaleX(d);
+      gridSvg += `<line x1="${x}" y1="${padT + plotH}" x2="${x}" y2="${padT + plotH + 4}" stroke="#475569" stroke-width="1" />`;
+      gridSvg += `<text x="${x}" y="${padT + plotH + 15}" fill="#94a3b8" font-size="9" text-anchor="middle" font-family="monospace">${d} m</text>`;
+    }
+
+    let steerPath = "";
+    let articPath = "";
+    for (let i = 0; i < states.length; i++) {
+      const st = states[i];
+      const sDist = getStateDist(st);
+      const x = scaleX(sDist).toFixed(1);
+      const ySteer = scaleY(st.steerAngleDeg).toFixed(1);
+      steerPath += (i === 0 ? `M ${x} ${ySteer}` : ` L ${x} ${ySteer}`);
+
+      if (hasTrailer) {
+        const yArtic = scaleY(st.articulationAngleDeg).toFixed(1);
+        articPath += (i === 0 ? `M ${x} ${yArtic}` : ` L ${x} ${yArtic}`);
+      }
+    }
+
+    const curIdx = Math.floor(this.currentFrameFloat || 0);
+    const curState = states[Math.min(states.length - 1, curIdx)] || states[0];
+    const curDist = getStateDist(curState);
+    const curX = scaleX(curDist).toFixed(1);
+    const curIndicator = `
+      <line id="pk-cursor-line" x1="${curX}" y1="${padT}" x2="${curX}" y2="${padT + plotH}" stroke="#ef4444" stroke-width="1.8" stroke-dasharray="3 2" />
+      <circle id="pk-cursor-circle-steer" cx="${curX}" cy="${scaleY(curState.steerAngleDeg).toFixed(1)}" r="3.5" fill="#38bdf8" stroke="#ffffff" stroke-width="1.2" />
+      ${hasTrailer ? `<circle id="pk-cursor-circle-artic" cx="${curX}" cy="${scaleY(curState.articulationAngleDeg).toFixed(1)}" r="3.5" fill="#f59e0b" stroke="#ffffff" stroke-width="1.2" />` : ""}
+    `;
+
+    container.innerHTML = `
+      <svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="none">
+        ${gridSvg}
+        <path d="${steerPath}" fill="none" stroke="#38bdf8" stroke-width="2" />
+        ${hasTrailer ? `<path d="${articPath}" fill="none" stroke="#f59e0b" stroke-width="1.8" />` : ""}
+        ${curIndicator}
+      </svg>
+    `;
+
+    container.onclick = (e) => {
+      const rect = container.getBoundingClientRect();
+      const clickX = e.clientX - rect.left;
+      const ratio = Math.max(0, Math.min(1, (clickX - (padL * rect.width) / W) / ((plotW * rect.width) / W)));
+      const targetDist = ratio * totalDist;
+
+      let closestIdx = 0;
+      let minDiff = Infinity;
+      for (let i = 0; i < states.length; i++) {
+        const sDist = getStateDist(states[i]);
+        const diff = Math.abs(sDist - targetDist);
+        if (diff < minDiff) {
+          minDiff = diff;
+          closestIdx = i;
+        }
+      }
+      this.jumpToFrame(closestIdx);
+    };
+  }
+
+  _updatePKCursor(frameIdx) {
+    if (!this.simResult || !this.simResult.states || !this.simResult.states.length) return;
+    const states = this.simResult.states;
+    const clamped = Math.min(states.length - 1, Math.max(0, frameIdx));
+    const st = states[clamped];
+    if (!st) return;
+
+    const getStateDist = (s) => (typeof s.distAlongPathM === "number" ? s.distAlongPathM : (typeof s.dist === "number" ? s.dist : 0));
+    const lastDist = getStateDist(states[states.length - 1]);
+    const totalDist = Math.max(0.01, this.simResult.summary?.totalDistanceM || lastDist || 1);
+    const sDist = getStateDist(st);
+    const hasTrailer = Boolean(this.vehicle && this.vehicle.hasTrailer);
+
+    const W = 1000;
+    const H = 120;
+    const padL = 50;
+    const padR = 25;
+    const padT = 15;
+    const padB = 25;
+    const plotW = W - padL - padR;
+    const plotH = H - padT - padB;
+
+    let maxAngle = 45;
+    for (const s of states) {
+      if (Math.abs(s.steerAngleDeg) > maxAngle) maxAngle = Math.ceil(Math.abs(s.steerAngleDeg) / 5) * 5;
+      if (hasTrailer && Math.abs(s.articulationAngleDeg) > maxAngle) maxAngle = Math.ceil(Math.abs(s.articulationAngleDeg) / 5) * 5;
+    }
+    maxAngle = Math.max(30, Math.min(85, maxAngle));
+
+    const curX = (padL + (sDist / totalDist) * plotW).toFixed(1);
+    const steerY = (padT + plotH / 2 - (st.steerAngleDeg / maxAngle) * (plotH / 2)).toFixed(1);
+
+    const line = document.getElementById("pk-cursor-line");
+    if (line) {
+      line.setAttribute("x1", curX);
+      line.setAttribute("x2", curX);
+    }
+    const cSteer = document.getElementById("pk-cursor-circle-steer");
+    if (cSteer) {
+      cSteer.setAttribute("cx", curX);
+      cSteer.setAttribute("cy", steerY);
+    }
+    const cArtic = document.getElementById("pk-cursor-circle-artic");
+    if (cArtic && hasTrailer) {
+      const articY = (padT + plotH / 2 - (st.articulationAngleDeg / maxAngle) * (plotH / 2)).toFixed(1);
+      cArtic.setAttribute("cx", curX);
+      cArtic.setAttribute("cy", articY);
+    }
+  }
+
+  showToast(message, type = "info", durationMs = 3500) {
+    let container = document.getElementById("toast-container");
+    if (!container) {
+      container = document.createElement("div");
+      container.id = "toast-container";
+      container.className = "toast-container";
+      document.body.appendChild(container);
+    }
+    const toast = document.createElement("div");
+    toast.className = `toast toast-${type}`;
+    const icons = {
+      info: "ℹ️",
+      success: "✅",
+      warning: "⚠️",
+      danger: "🚫"
+    };
+    toast.innerHTML = `<span>${icons[type] || "ℹ️"}</span><span>${escapeHTML(message)}</span>`;
+    container.appendChild(toast);
+    setTimeout(() => {
+      toast.style.opacity = "0";
+      toast.style.transform = "translateY(8px)";
+      setTimeout(() => toast.remove(), 260);
+    }, durationMs);
+  }
+
+  jumpToFrame(frameIdx, centerPt = null) {
+    if (!this.simResult || !this.simResult.states.length) return;
+    this.isPlaying = false;
+    this._updatePlayButtonUI();
+    this.currentFrameFloat = Math.max(0, Math.min(this.simResult.states.length - 1, frameIdx));
+    this.currentAnimDistM = this.simResult.states[Math.floor(this.currentFrameFloat)]?.dist ?? 0;
+    const slider = document.getElementById("slider-timeline");
+    if (slider) slider.value = Math.floor(this.currentFrameFloat);
+    if (centerPt && Array.isArray(centerPt)) {
+      this.viewer2D.camX = centerPt[0];
+      this.viewer2D.camY = centerPt[1];
+    }
+    this._syncFrameToViewers(Math.floor(this.currentFrameFloat));
+  }
+
+  toggleSidebar(forceState) {
+    const layout = document.querySelector(".app-layout");
+    const toggleBtn = document.getElementById("btn-toggle-sidebar");
+    if (!layout) return;
+    const isCurrentlyCollapsed = layout.classList.contains("sidebar-collapsed");
+    const nextCollapsed = typeof forceState === "boolean" ? forceState : !isCurrentlyCollapsed;
+    layout.classList.toggle("sidebar-collapsed", nextCollapsed);
+    this.leftSidebarCollapsed = nextCollapsed;
+    if (toggleBtn) {
+      toggleBtn.textContent = nextCollapsed ? "▶" : "◀";
+      toggleBtn.title = nextCollapsed ? "Desplegar panel lateral (Ctrl+B)" : "Plegar panel lateral (Ctrl+B)";
+    }
+    setTimeout(() => {
+      this.viewer2D.resize();
+      this.viewer3D.resize();
+    }, 240);
+  }
+
+  toggleWaypointMode(active) {
+    const isActive = this.viewer2D.toggleWaypointMode(active);
+    const btn = document.getElementById("btn-draw-waypoints");
+    const btnSidebar = document.getElementById("btn-draw-waypoints-sidebar");
+    if (btn) {
+      btn.classList.toggle("active", isActive);
+      btn.textContent = isActive ? "✏️ Trazar [Activo]" : "✏️ Trazar ruta";
+    }
+    if (btnSidebar) {
+      btnSidebar.classList.toggle("active", isActive);
+      btnSidebar.textContent = isActive ? "✏️ Trazar en plano [Activo]" : "✏️ Trazar / Editar ruta en plano 2D";
+    }
+    if (isActive) {
+      const detailsSections = document.querySelectorAll(".left-sidebar details");
+      if (detailsSections[2] && !detailsSections[2].open) {
+        detailsSections[2].open = true;
+      }
+      this.showToast("Modo trazado activo: Clic en el plano para añadir o arrastrar waypoints", "info", 3200);
+    }
+    return isActive;
+  }
+
+  clearVehicleTrajectory() {
+    if (this._recomputeTimer) {
+      clearTimeout(this._recomputeTimer);
+      this._recomputeTimer = null;
+    }
+    if (this.isPlaying) {
+      this.togglePlay();
+    }
+    if (this.viewer2D.waypointMode) {
+      this.toggleWaypointMode(false);
+    }
+    // Limpiar waypoints en el visor sin emitir evento redundante
+    this.viewer2D.clearWaypoints(true);
+    const txtEl = document.getElementById("inp-waypoints-text");
+    if (txtEl) txtEl.value = "";
+    this.maneuver.segments = [];
+    this.currentFrameFloat = 0;
+    this.currentAnimDistM = 0;
+    const slider = document.getElementById("slider-timeline");
+    if (slider) {
+      slider.value = 0;
+      slider.max = 0;
+    }
+    const pkEl = document.getElementById("timeline-pk-val");
+    if (pkEl) pkEl.textContent = "PK 0.00 m";
+    this._populateManeuverInputs();
+    this._renderSegmentsListUI();
+    this.recomputeAll(false);
+    this.history.pushState(this.getSnapshot());
+    this._updateUndoRedoButtonsUI();
+    this.showToast("Trazado borrado. El vehículo permanece en reposo en el origen, listo para una nueva maniobra.", "info");
+  }
+
+  toggleMeasureMode(active) {
+    const isActive = this.viewer2D.toggleMeasureMode(active);
+    const btn = document.getElementById("btn-measure-tool");
+    if (btn) {
+      btn.classList.toggle("active", isActive);
+      btn.textContent = isActive ? "📏 Medir [Activo]" : "📏 Medir distancia";
+    }
+    return isActive;
+  }
+
+  stepFrame(delta) {
+    if (!this.simResult || !this.simResult.states.length) return;
+    this.isPlaying = false;
+    this._updatePlayButtonUI();
+    const total = this.simResult.states.length;
+    this.currentFrameFloat = Math.max(0, Math.min(total - 1, Math.round(this.currentFrameFloat) + delta));
+    this.currentAnimDistM = this.simResult.states[Math.floor(this.currentFrameFloat)]?.dist ?? 0;
+    this._syncFrameToViewers(Math.floor(this.currentFrameFloat));
   }
 
   _initUI() {
@@ -195,30 +885,51 @@ export class SweptPathApp {
         if (!Number.isFinite(val)) return;
         this.vehicle[path[0]][path[1]] = val;
         this.isCustomModified = true;
-        this.recomputeAll(false);
+        this.scheduleRecompute(120, false);
       });
     }
 
     // 3. Selector de escenarios preconfigurados (Sección C)
     const scenSelect = document.getElementById("select-scenario");
     scenSelect.innerHTML = "";
+
+    const optEmpty = document.createElement("option");
+    optEmpty.value = "";
+    optEmpty.textContent = "-- Visor limpio / Sin escenario --";
+    scenSelect.appendChild(optEmpty);
+
     for (const sc of Object.values(PRESET_SCENARIOS)) {
       const opt = document.createElement("option");
       opt.value = sc.id;
       opt.textContent = sc.name;
       scenSelect.appendChild(opt);
     }
-    scenSelect.value = this.selectedScenarioId;
+    scenSelect.value = this.selectedScenarioId || "";
     scenSelect.addEventListener("change", () => {
       this.selectedScenarioId = scenSelect.value;
+      if (!this.selectedScenarioId) {
+        this.maneuver = {
+          startPose: { x: 0, y: 0, headingDeg: 0, initialArticulationDeg: 0 },
+          segments: []
+        };
+        this.obstacles = [];
+        this.cadBackgroundEntities = [];
+        this._populateManeuverInputs();
+        this._renderSegmentsListUI();
+        this._renderObstaclesListUI();
+        this.recomputeAll(true);
+        return;
+      }
       const sc = PRESET_SCENARIOS[this.selectedScenarioId];
       if (!sc) return;
       this.safetyMarginM = sc.safetyMarginM;
       this.maneuver = JSON.parse(JSON.stringify(sc.maneuver));
       this.obstacles = JSON.parse(JSON.stringify(sc.obstacles));
+      this.cadBackgroundEntities = [];
       document.getElementById("inp-safety-margin").value = this.safetyMarginM;
       this._populateManeuverInputs();
       this._renderObstaclesListUI();
+      this._renderSegmentsListUI();
       this.recomputeAll(true);
     });
 
@@ -238,7 +949,17 @@ export class SweptPathApp {
         const val = parseFloat(el.value);
         if (!Number.isFinite(val)) return;
         this.maneuver.startPose[key] = val;
-        this.recomputeAll(false);
+        this.scheduleRecompute(120, false);
+      });
+    }
+
+    const selSteeringRef = document.getElementById("sel-steering-ref-point");
+    if (selSteeringRef) {
+      selSteeringRef.value = this.maneuver.steeringReferencePoint || "rear_axle";
+      selSteeringRef.addEventListener("change", (e) => {
+        this.maneuver.steeringReferencePoint = e.target.value;
+        this._renderSegmentsListUI();
+        this.scheduleRecompute(60, false);
       });
     }
 
@@ -271,17 +992,78 @@ export class SweptPathApp {
           }
         }
       }
-      if (pts.length >= 2) {
-        const built = buildSegmentsFromWaypoints(pts, filletR, dir);
+      if (pts.length === 1) {
+        this.maneuver.startPose = {
+          ...this.maneuver.startPose,
+          x: pts[0][0],
+          y: pts[0][1]
+        };
+        this.maneuver.segments = [];
+        this.viewer2D.setWaypoints(pts);
+        this._populateManeuverInputs();
+        this._renderSegmentsListUI();
+        this.recomputeAll(true);
+      } else if (pts.length >= 2) {
+        const mode = document.getElementById("sel-waypoints-mode")?.value || this.trajectoryMode || "spline";
+        const built = buildSegmentsFromWaypoints(pts, filletR, dir, { mode, vehicle: this.vehicle });
+        this.maneuver.startPose = {
+          ...this.maneuver.startPose,
+          ...built.startPose
+        };
+        this.maneuver.segments = built.segments;
+        this.viewer2D.setWaypoints(pts);
+        this._populateManeuverInputs();
+        this._renderSegmentsListUI();
+        this.recomputeAll(true);
+      }
+    });
+
+    // Selector y conmutador de método de curvatura (Spline CAD vs Polilínea con acuerdos)
+    const selWaypointsMode = document.getElementById("sel-waypoints-mode");
+    const colWaypointsRadius = document.getElementById("col-waypoints-radius");
+    const btnToggleSpline = document.getElementById("btn-toggle-spline-mode");
+
+    const updateTrajectoryMode = (newMode) => {
+      this.trajectoryMode = newMode;
+      if (selWaypointsMode) selWaypointsMode.value = newMode;
+      if (colWaypointsRadius) {
+        colWaypointsRadius.style.display = newMode === "fillet" ? "block" : "none";
+      }
+      if (btnToggleSpline) {
+        btnToggleSpline.textContent = newMode === "spline" ? "⚡ Spline CAD" : "📐 Polilínea";
+        btnToggleSpline.title = newMode === "spline"
+          ? "Modo activo: Spline CAD continua (clic para cambiar a Polilínea + Arcos)"
+          : "Modo activo: Polilínea con acuerdos fijos (clic para cambiar a Spline CAD continua)";
+        btnToggleSpline.style.borderColor = newMode === "spline" ? "#0284c7" : "#64748b";
+        btnToggleSpline.style.color = newMode === "spline" ? "#38bdf8" : "#94a3b8";
+      }
+      if (this.viewer2D) {
+        this.viewer2D.setTrajectoryMode(newMode);
+      }
+      if (this.viewer2D?.waypoints?.length >= 2) {
+        const filletR = parseFloat(document.getElementById("inp-waypoints-radius")?.value) || 12.5;
+        const dir = parseInt(document.getElementById("sel-waypoints-dir")?.value, 10) || 1;
+        const built = buildSegmentsFromWaypoints(this.viewer2D.waypoints, filletR, dir, { mode: newMode, vehicle: this.vehicle });
         this.maneuver.startPose = {
           ...this.maneuver.startPose,
           ...built.startPose
         };
         this.maneuver.segments = built.segments;
         this._populateManeuverInputs();
-        this.recomputeAll(true);
+        this._renderSegmentsListUI();
+        this.recomputeAll(false);
       }
-    });
+    };
+
+    if (selWaypointsMode) {
+      selWaypointsMode.addEventListener("change", (e) => updateTrajectoryMode(e.target.value));
+    }
+    if (btnToggleSpline) {
+      btnToggleSpline.addEventListener("click", () => {
+        const nextMode = this.trajectoryMode === "spline" ? "fillet" : "spline";
+        updateTrajectoryMode(nextMode);
+      });
+    }
 
     // Discretización numérica
     document.getElementById("inp-step-straight").addEventListener("change", (e) => {
@@ -316,6 +1098,59 @@ export class SweptPathApp {
       this.viewer3D.fitToScene();
     });
 
+    // Control de Deshacer / Rehacer (UX-07)
+    const btnUndo = document.getElementById("btn-undo");
+    const btnRedo = document.getElementById("btn-redo");
+    if (btnUndo) {
+      btnUndo.addEventListener("click", () => this.undo());
+    }
+    if (btnRedo) {
+      btnRedo.addEventListener("click", () => this.redo());
+    }
+
+    // Guardado y carga de proyectos .turnsim.json (UX-07)
+    const btnSaveTop = document.getElementById("btn-save-project-top");
+    const btnSaveSec = document.getElementById("btn-export-session");
+    if (btnSaveTop) btnSaveTop.addEventListener("click", () => this.exportSessionJSON());
+    if (btnSaveSec) btnSaveSec.addEventListener("click", () => this.exportSessionJSON());
+
+    const inpSession = document.getElementById("inp-session-file");
+    const btnLoadTop = document.getElementById("btn-load-project-top");
+    const btnLoadSec = document.getElementById("btn-import-session");
+    if (btnLoadTop && inpSession) btnLoadTop.addEventListener("click", () => inpSession.click());
+    if (btnLoadSec && inpSession) btnLoadSec.addEventListener("click", () => inpSession.click());
+    if (inpSession) {
+      inpSession.addEventListener("change", (e) => {
+        if (e.target.files && e.target.files[0]) {
+          this.importSessionJSON(e.target.files[0]);
+          inpSession.value = "";
+        }
+      });
+    }
+
+    // Conmutador bilingüe ES / EN (SEO-05)
+    const btnLang = document.getElementById("btn-lang-toggle");
+    if (btnLang) {
+      btnLang.addEventListener("click", () => {
+        this.i18n.toggleLanguage();
+        this._updateVehicleSummaryAndValidationUI();
+        this._updateTopTelemetryBar();
+        this._renderSegmentsListUI();
+        this._renderObstaclesListUI();
+      });
+    }
+    this.i18n.updateDOM();
+
+    // Panel de curvas PK (UX-09)
+    const btnCurves = document.getElementById("btn-toggle-curves");
+    const btnCloseCurves = document.getElementById("btn-close-curves");
+    if (btnCurves) {
+      btnCurves.addEventListener("click", () => this.toggleCurvesPanel());
+    }
+    if (btnCloseCurves) {
+      btnCloseCurves.addEventListener("click", () => this.toggleCurvesPanel(false));
+    }
+
     // Herramienta de medición interactiva de distancias en planta 2D
     const btnMeasure = document.getElementById("btn-measure-tool");
     const btnClearMeasure = document.getElementById("btn-clear-measure");
@@ -323,9 +1158,7 @@ export class SweptPathApp {
 
     if (btnMeasure) {
       btnMeasure.addEventListener("click", () => {
-        const isActive = this.viewer2D.toggleMeasureMode();
-        btnMeasure.classList.toggle("active", isActive);
-        btnMeasure.textContent = isActive ? "📏 Medir [Activo]" : "📏 Medir distancia";
+        this.toggleMeasureMode();
       });
     }
 
@@ -334,6 +1167,154 @@ export class SweptPathApp {
         this.viewer2D.clearMeasurement();
       });
     }
+
+    // Herramienta de trazado interactivo de waypoints en planta 2D (UX-04)
+    const btnWaypoints = document.getElementById("btn-draw-waypoints");
+    const btnWaypointsSidebar = document.getElementById("btn-draw-waypoints-sidebar");
+    if (btnWaypoints) {
+      btnWaypoints.addEventListener("click", () => {
+        this.toggleWaypointMode();
+      });
+    }
+    if (btnWaypointsSidebar) {
+      btnWaypointsSidebar.addEventListener("click", () => {
+        this.toggleWaypointMode();
+      });
+    }
+
+    // Herramienta para eliminar el trazado y empezar de nuevo
+    const btnClearPath = document.getElementById("btn-clear-path");
+    const btnClearPathSidebar = document.getElementById("btn-clear-path-sidebar");
+    if (btnClearPath) {
+      btnClearPath.addEventListener("click", () => this.clearVehicleTrajectory());
+    }
+    if (btnClearPathSidebar) {
+      btnClearPathSidebar.addEventListener("click", () => this.clearVehicleTrajectory());
+    }
+
+    this.viewer2D.onWaypointModeChange = (isActive) => {
+      if (btnWaypoints) {
+        btnWaypoints.classList.toggle("active", isActive);
+        btnWaypoints.textContent = isActive ? "✏️ Trazar [Activo]" : "✏️ Trazar ruta";
+      }
+      if (btnWaypointsSidebar) {
+        btnWaypointsSidebar.classList.toggle("active", isActive);
+        btnWaypointsSidebar.textContent = isActive ? "✏️ Trazar en plano [Activo]" : "✏️ Trazar / Editar ruta en plano 2D";
+      }
+    };
+
+    // Botón de salto rápido a interacción crítica en barra superior (UX-05)
+    const btnJumpCritical = document.getElementById("btn-jump-critical-pk");
+    if (btnJumpCritical) {
+      btnJumpCritical.addEventListener("click", () => {
+        const rep = this.interferenceReport;
+        if (rep && rep.criticalInteraction && rep.criticalInteraction.stepIndex !== undefined) {
+          this.jumpToFrame(
+            rep.criticalInteraction.stepIndex,
+            rep.criticalInteraction.pointOnVehicle || rep.criticalInteraction.pointOnObstacle
+          );
+          this.showToast(
+            `Situado en punto crítico: PK ${rep.criticalInteraction.distAlongPathM.toFixed(2)} m (${rep.criticalInteraction.name} · ${rep.criticalInteraction.statusLabel})`,
+            rep.globalStatus === "COLLISION" ? "danger" : rep.globalStatus === "CLEAR" ? "info" : "warning"
+          );
+        } else {
+          this.showToast("No hay interacción crítica evaluada para saltar.", "info");
+        }
+      });
+    }
+
+    // Botón de plegado del panel lateral (UX-08)
+    const btnToggleSidebar = document.getElementById("btn-toggle-sidebar");
+    if (btnToggleSidebar) {
+      btnToggleSidebar.addEventListener("click", () => {
+        this.toggleSidebar();
+      });
+    }
+
+    // Modal de guía técnica y metodología (SEO-03)
+    const btnMethodology = document.getElementById("btn-open-methodology");
+    const modalMethodology = document.getElementById("modal-methodology");
+    const btnCloseMethodology = document.getElementById("btn-close-methodology");
+    if (btnMethodology && modalMethodology) {
+      btnMethodology.addEventListener("click", () => {
+        if (typeof modalMethodology.showModal === "function") {
+          modalMethodology.showModal();
+        } else {
+          modalMethodology.style.display = "flex";
+        }
+      });
+    }
+    if (btnCloseMethodology && modalMethodology) {
+      btnCloseMethodology.addEventListener("click", () => {
+        if (typeof modalMethodology.close === "function") {
+          modalMethodology.close();
+        } else {
+          modalMethodology.style.display = "none";
+        }
+      });
+    }
+
+    // Atajos de teclado globales accesibles (UX-06)
+    window.addEventListener("keydown", (e) => {
+      const tag = document.activeElement ? document.activeElement.tagName.toUpperCase() : "";
+      const isInput = tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT";
+
+      if ((e.ctrlKey || e.metaKey) && (e.key === "b" || e.key === "B")) {
+        e.preventDefault();
+        this.toggleSidebar();
+        return;
+      }
+
+      if ((e.ctrlKey || e.metaKey) && (e.key === "z" || e.key === "Z")) {
+        e.preventDefault();
+        if (e.shiftKey) {
+          this.redo();
+        } else {
+          this.undo();
+        }
+        return;
+      }
+
+      if ((e.ctrlKey || e.metaKey) && (e.key === "y" || e.key === "Y")) {
+        e.preventDefault();
+        this.redo();
+        return;
+      }
+
+      if ((e.ctrlKey || e.metaKey) && (e.key === "s" || e.key === "S")) {
+        e.preventDefault();
+        this.exportSessionJSON();
+        return;
+      }
+
+      if (isInput) return;
+
+      if (e.code === "Space") {
+        e.preventDefault();
+        this.isPlaying = !this.isPlaying;
+        this._updatePlayButtonUI();
+        if (this.isPlaying) this._startAnimationLoop();
+      } else if (e.code === "ArrowLeft") {
+        e.preventDefault();
+        this.stepFrame(-1);
+      } else if (e.code === "ArrowRight") {
+        e.preventDefault();
+        this.stepFrame(1);
+      } else if (e.code === "KeyF") {
+        e.preventDefault();
+        if (this.viewMode === "3d" && this.viewer3D.available) {
+          this.viewer3D.fitToScene();
+        } else {
+          this.viewer2D.fitToScene();
+        }
+      } else if (e.code === "KeyT") {
+        e.preventDefault();
+        this.toggleWaypointMode();
+      } else if (e.code === "KeyM") {
+        e.preventDefault();
+        this.toggleMeasureMode();
+      }
+    });
 
     this.viewer2D.onMeasureUpdate = (info) => {
       if (info) {
@@ -370,7 +1351,8 @@ export class SweptPathApp {
       ["chk-layer-cad-bg", "cadBackground"],
       ["chk-layer-dims", "dimensions"],
       ["chk-layer-axles", "axlesAndPoints"],
-      ["chk-layer-grid", "grid"]
+      ["chk-layer-grid", "grid"],
+      ["chk-layer-pnoa", "pnoa"]
     ];
 
     for (const [chkId, layerName] of layerCheckBindings) {
@@ -378,6 +1360,16 @@ export class SweptPathApp {
       if (!el) continue;
       el.addEventListener("change", () => {
         this.viewer2D.layers[layerName] = el.checked;
+        if (layerName === "pnoa") {
+          this.viewer2D.pnoaConfig.enabled = el.checked;
+          const btnTogglePnoa = document.getElementById("btn-toggle-pnoa");
+          if (btnTogglePnoa) {
+            btnTogglePnoa.classList.toggle("active", el.checked);
+            btnTogglePnoa.style.borderColor = el.checked ? "#0284c7" : "#334155";
+            btnTogglePnoa.style.color = el.checked ? "#38bdf8" : "#94a3b8";
+            btnTogglePnoa.style.background = el.checked ? "rgba(2, 132, 199, 0.28)" : "rgba(15,23,42,0.85)";
+          }
+        }
         if (layerName in this.viewer3D.layers) {
           this.viewer3D.layers[layerName] = el.checked;
           this.viewer3D.updateLayerVisibility();
@@ -386,6 +1378,9 @@ export class SweptPathApp {
       });
     }
 
+    // Configuración y gestión de capa PNOA (IGN)
+    this._setupPnoaUI();
+
     // Margen de seguridad
     const marginInput = document.getElementById("inp-safety-margin");
     marginInput.value = this.safetyMarginM;
@@ -393,7 +1388,7 @@ export class SweptPathApp {
       const v = parseFloat(marginInput.value);
       if (Number.isFinite(v) && v >= 0 && v <= 3.0) {
         this.safetyMarginM = v;
-        this.recomputeAll(false);
+        this.scheduleRecompute(120, false);
       }
     });
 
@@ -427,6 +1422,7 @@ export class SweptPathApp {
     document.getElementById("btn-play-reset").addEventListener("click", () => {
       this.isPlaying = false;
       this.currentFrameFloat = 0;
+      this.currentAnimDistM = 0;
       this._updatePlayButtonUI();
       this._syncFrameToViewers(0);
     });
@@ -441,6 +1437,7 @@ export class SweptPathApp {
       this._updatePlayButtonUI();
       const idx = parseInt(timelineSlider.value, 10) || 0;
       this.currentFrameFloat = idx;
+      this.currentAnimDistM = this.simResult?.states?.[idx]?.dist ?? 0;
       this._syncFrameToViewers(idx);
     });
 
@@ -458,7 +1455,8 @@ export class SweptPathApp {
         simResult: this.simResult,
         interferenceReport: this.interferenceReport,
         obstacles: this.obstacles,
-        layerVisibility: this.viewer2D.layers
+        layerVisibility: this.viewer2D.layers,
+        cadBackgroundEntities: this.cadBackgroundEntities
       });
     });
 
@@ -481,8 +1479,27 @@ export class SweptPathApp {
       });
     });
 
+    const btnExportReportMd = document.getElementById("btn-export-report-md");
+    if (btnExportReportMd) {
+      btnExportReportMd.addEventListener("click", () => {
+        const projectName =
+          document.getElementById("inp-project-name").value.trim() ||
+          "Estudio de Seguridad Vial — Simulación de Barrido";
+        const scenarioObj = PRESET_SCENARIOS[this.selectedScenarioId];
+        downloadMarkdownTechnicalReport({
+          projectName,
+          scenarioName: scenarioObj ? scenarioObj.name : "Maniobra personalizada",
+          vehicle: this.vehicle,
+          maneuver: this.maneuver,
+          simResult: this.simResult,
+          interferenceReport: this.interferenceReport,
+          obstacles: this.obstacles
+        });
+      });
+    }
+
     document.getElementById("btn-export-dxf").addEventListener("click", () => {
-      const dxf = generateDXFContent(this.simResult, this.obstacles);
+      const dxf = generateDXFContent(this.simResult, this.obstacles, this.cadBackgroundEntities);
       downloadTextFile(
         `barrido_${this.vehicle.id}_${this.selectedScenarioId}.dxf`,
         dxf,
@@ -495,7 +1512,8 @@ export class SweptPathApp {
         this.simResult,
         this.interferenceReport,
         this.obstacles,
-        this.viewer2D.layers
+        this.viewer2D.layers,
+        this.cadBackgroundEntities
       );
       downloadTextFile(
         `planta_barrido_${this.vehicle.id}_${this.selectedScenarioId}.svg`,
@@ -507,6 +1525,120 @@ export class SweptPathApp {
     this._populateVehicleInputs();
     this._populateManeuverInputs();
     this._renderObstaclesListUI();
+    this._initHybridWorkflow();
+  }
+
+  _initHybridWorkflow() {
+    this.currentStage = 4;
+    const stageTitles = {
+      1: "1. Escenario y Entorno CAD",
+      2: "2. Selección y Cotas de Vehículo",
+      3: "3. Trazado y Tramos de Maniobra",
+      4: "4. Simulación Cinemática y Capas",
+      5: "5. Análisis de Resguardo y Obstáculos",
+      6: "6. Informes Técnicos y Exportación"
+    };
+
+    const activateStage = (stageNum) => {
+      this.currentStage = stageNum;
+
+      // Actualizar píldoras del stepper
+      document.querySelectorAll(".stepper-pill").forEach((pill) => {
+        const s = parseInt(pill.dataset.stage, 10);
+        pill.classList.toggle("active", s === stageNum);
+        if (s < stageNum) {
+          pill.classList.add("completed");
+          const dot = pill.querySelector(".step-dot");
+          if (dot) dot.textContent = "✓";
+        } else {
+          pill.classList.remove("completed");
+          const dot = pill.querySelector(".step-dot");
+          if (dot) dot.textContent = String(s);
+        }
+      });
+
+      // Actualizar botones de la barra de actividades
+      document.querySelectorAll(".act-btn[data-stage]").forEach((btn) => {
+        const s = parseInt(btn.dataset.stage, 10);
+        btn.classList.toggle("active", s === stageNum);
+      });
+
+      // Actualizar título de la gaveta
+      const titleEl = document.getElementById("drawer-active-title");
+      if (titleEl && stageTitles[stageNum]) {
+        titleEl.textContent = stageTitles[stageNum];
+      }
+
+      // Mostrar el bloque de la etapa y ocultar los demás
+      for (let i = 1; i <= 6; i++) {
+        const block = document.getElementById(`stage-block-${i}`);
+        if (block) {
+          block.style.display = i === stageNum ? "block" : "none";
+        }
+      }
+
+      // Asegurar que la gaveta esté desplegada
+      const layout = document.querySelector(".app-layout");
+      if (layout && layout.classList.contains("sidebar-collapsed")) {
+        this.toggleSidebar(false);
+      }
+    };
+
+    // Listeners para clics en el stepper
+    document.querySelectorAll(".stepper-pill").forEach((pill) => {
+      pill.addEventListener("click", () => {
+        const s = parseInt(pill.dataset.stage, 10);
+        if (Number.isFinite(s)) activateStage(s);
+      });
+    });
+
+    // Listeners para clics en la barra de actividades
+    document.querySelectorAll(".act-btn[data-stage]").forEach((btn) => {
+      btn.addEventListener("click", () => {
+        const s = parseInt(btn.dataset.stage, 10);
+        if (!Number.isFinite(s)) return;
+        const layout = document.querySelector(".app-layout");
+        const isCollapsed = layout && layout.classList.contains("sidebar-collapsed");
+        if (s === this.currentStage && !isCollapsed) {
+          this.toggleSidebar(true);
+        } else {
+          activateStage(s);
+        }
+      });
+    });
+
+    // Listeners para botones de navegación interna "Avanzar a..." / "◀ ..."
+    document.querySelectorAll(".btn-goto-stage").forEach((btn) => {
+      btn.addEventListener("click", () => {
+        const s = parseInt(btn.dataset.target, 10);
+        if (Number.isFinite(s)) activateStage(s);
+      });
+    });
+
+    // Botón de cierre de la gaveta (✕)
+    const btnCloseDrawer = document.getElementById("btn-close-drawer");
+    if (btnCloseDrawer) {
+      btnCloseDrawer.addEventListener("click", () => {
+        this.toggleSidebar(true);
+      });
+    }
+
+    // Coordenadas métricas dinámicas del cursor CAD en barra inferior
+    const canvas = document.getElementById("canvas-2d");
+    const coordsEl = document.getElementById("cad-cursor-coords");
+    if (canvas && coordsEl) {
+      canvas.addEventListener("mousemove", (e) => {
+        if (!this.viewer2D) return;
+        const rect = canvas.getBoundingClientRect();
+        const mx = e.clientX - rect.left;
+        const my = e.clientY - rect.top;
+        const [wx, wy] = this.viewer2D.screenToWorld(mx, my);
+        coordsEl.textContent = `COORD: X = ${wx.toFixed(2)} m | Y = ${wy.toFixed(2)} m | Z = 0.00 m`;
+      });
+    }
+
+    // Estado inicial en Etapa 1: Escenario y Entorno CAD
+    activateStage(1);
   }
 
   setViewMode(mode) {
@@ -516,16 +1648,39 @@ export class SweptPathApp {
     document.querySelectorAll(".view-mode-btn").forEach((b) => {
       b.classList.toggle("active", b.dataset.mode === mode);
     });
-    setTimeout(() => {
+
+    const triggerFit = () => {
       this.viewer2D.resize();
       this.viewer3D.resize();
-    }, 30);
+      if (mode === "3d" || mode === "split") {
+        if (!this.viewer3D.available && typeof this.viewer3D.initIfAvailable === "function") {
+          this.viewer3D.initIfAvailable();
+        }
+        if (this.viewer3D.available) {
+          this.viewer3D.fitToScene();
+        }
+      } else if (mode === "2d") {
+        this.viewer2D.fitToScene();
+      }
+    };
+
+    // Encuadre inmediato y consolidación tras cálculo de dimensiones de layout
+    triggerFit();
+    setTimeout(triggerFit, 40);
   }
 
   _onIndependentVehicleChange() {
+    const trObj = TRACTOR_CATALOG[this.selectedTractorKey];
+    const isRigid = Boolean(trObj?.isRigid);
+    if (isRigid) {
+      this.selectedTrailerKey = "none";
+    } else if (this.selectedTrailerKey === "none") {
+      this.selectedTrailerKey = "schmitz_sko_cool";
+    }
+
     let matchedPreset = null;
     for (const [presetId, preset] of Object.entries(VEHICLE_CATALOG)) {
-      if (preset.tractorKey === this.selectedTractorKey && preset.trailerKey === this.selectedTrailerKey) {
+      if (preset.tractorKey === this.selectedTractorKey && (isRigid || preset.trailerKey === this.selectedTrailerKey)) {
         matchedPreset = presetId;
         break;
       }
@@ -543,31 +1698,72 @@ export class SweptPathApp {
     }
     this.isCustomModified = false;
     this._populateVehicleInputs();
+    this.history.pushState(this.getSnapshot());
+    this._updateUndoRedoButtonsUI();
     this.recomputeAll(false);
   }
 
   _populateVehicleInputs() {
     const v = this.vehicle;
-    document.getElementById("inp-tr-wb").value = v.tractor.wheelbase;
-    document.getElementById("inp-tr-fo").value = v.tractor.frontOverhang;
-    document.getElementById("inp-tr-ro").value = v.tractor.rearOverhang;
-    document.getElementById("inp-tr-w").value = v.tractor.width;
-    document.getElementById("inp-tr-track").value = v.tractor.trackWidth;
-    document.getElementById("inp-tr-hitch").value = v.tractor.hitchOffset;
-    document.getElementById("inp-tr-steer").value = v.tractor.maxSteerAngleDeg;
+    const isRigid = !v.hasTrailer || !v.trailer;
 
-    document.getElementById("inp-tl-wb").value = v.trailer.wheelbase;
-    document.getElementById("inp-tl-fo").value = v.trailer.frontOverhang;
-    document.getElementById("inp-tl-ro").value = v.trailer.rearOverhang;
-    document.getElementById("inp-tl-w").value = v.trailer.width;
-    document.getElementById("inp-tl-spacing").value = v.trailer.axleSpacing || 1.31;
-    document.getElementById("inp-lim-artic").value = v.limits?.maxArticulationAngleDeg || 85;
+    const trWb = document.getElementById("inp-tr-wb");
+    if (trWb) trWb.value = v.tractor.wheelbase;
+    const trFo = document.getElementById("inp-tr-fo");
+    if (trFo) trFo.value = v.tractor.frontOverhang;
+    const trRo = document.getElementById("inp-tr-ro");
+    if (trRo) trRo.value = v.tractor.rearOverhang;
+    const trW = document.getElementById("inp-tr-w");
+    if (trW) trW.value = v.tractor.width;
+    const trTrack = document.getElementById("inp-tr-track");
+    if (trTrack) trTrack.value = v.tractor.trackWidth || (v.tractor.width - 0.40);
+    const trHitch = document.getElementById("inp-tr-hitch");
+    if (trHitch) {
+      trHitch.value = isRigid ? 0 : v.tractor.hitchOffset;
+      trHitch.disabled = isRigid;
+    }
+    const trSteer = document.getElementById("inp-tr-steer");
+    if (trSteer) trSteer.value = v.tractor.maxSteerAngleDeg;
+
+    const trailerGroup = document.getElementById("group-trailer-params");
+    const rigidBadge = document.getElementById("badge-rigid-vehicle");
+    if (trailerGroup) {
+      trailerGroup.classList.toggle("trailer-disabled", isRigid);
+    }
+    if (rigidBadge) {
+      rigidBadge.style.display = isRigid ? "block" : "none";
+    }
+
+    const tlSelect = document.getElementById("select-trailer");
+    if (tlSelect) {
+      tlSelect.value = isRigid ? "none" : (v.trailerKey || "schmitz_sko_cool");
+      tlSelect.disabled = isRigid;
+    }
+
+    if (!isRigid && v.trailer) {
+      const tlWb = document.getElementById("inp-tl-wb");
+      if (tlWb) tlWb.value = v.trailer.wheelbase;
+      const tlFo = document.getElementById("inp-tl-fo");
+      if (tlFo) tlFo.value = v.trailer.frontOverhang;
+      const tlRo = document.getElementById("inp-tl-ro");
+      if (tlRo) tlRo.value = v.trailer.rearOverhang;
+      const tlW = document.getElementById("inp-tl-w");
+      if (tlW) tlW.value = v.trailer.width;
+      const tlSpacing = document.getElementById("inp-tl-spacing");
+      if (tlSpacing) tlSpacing.value = v.trailer.axleSpacing || 1.31;
+      const limArtic = document.getElementById("inp-lim-artic");
+      if (limArtic) limArtic.value = v.limits?.maxArticulationAngleDeg || 85;
+    }
   }
 
   _updateVehicleSummaryAndValidationUI() {
     const v = this.vehicle;
     const metrics = computeDerivedVehicleMetrics(v);
     const validation = validateVehicleParams(v);
+
+    if (this.viewer2D) {
+      this.viewer2D.setMinVehicleTurnRadius(metrics.minRefRadius || metrics.minKerbTurningRadius || 6.8);
+    }
 
     const badgeEl = document.getElementById("vehicle-verification-badge");
     if (this.isCustomModified) {
@@ -585,9 +1781,9 @@ export class SweptPathApp {
     summaryEl.innerHTML = `
       <div><strong>${v.manufacturer}</strong> — ${v.modelVariant || v.name}</div>
       <div class="vehicle-summary-grid">
-        <div>L<sub>total</sub> acoplado: <strong>${metrics.totalCoupledLength.toFixed(3)} m</strong></div>
-        <div>L<sub>tractora</sub>: <strong>${metrics.tractorLength.toFixed(3)} m</strong></div>
-        <div>L<sub>semirrem.</sub>: <strong>${metrics.trailerLength.toFixed(3)} m</strong></div>
+        <div>L<sub>total</sub>: <strong>${metrics.totalCoupledLength.toFixed(3)} m</strong></div>
+        <div>${v.hasTrailer ? "L<sub>tractora</sub>" : "L<sub>chasis</sub>"}: <strong>${metrics.tractorLength.toFixed(3)} m</strong></div>
+        ${v.hasTrailer ? `<div>L<sub>semirrem.</sub>: <strong>${metrics.trailerLength.toFixed(3)} m</strong></div>` : `<div>Carrocería: <strong>Rígido (Cuerpo único)</strong></div>`}
         <div>R<sub>mín,pared</sub>: <strong>${metrics.minWallTurningRadius.toFixed(2)} m</strong></div>
       </div>
       <div style="margin-top:4px;font-size:10px;color:#94a3b8;">
@@ -612,6 +1808,10 @@ export class SweptPathApp {
     document.getElementById("inp-pose-y").value = sp.y ?? 0;
     document.getElementById("inp-pose-heading").value = sp.headingDeg ?? 0;
     document.getElementById("inp-pose-artic").value = sp.initialArticulationDeg ?? 0;
+    const selRef = document.getElementById("sel-steering-ref-point");
+    if (selRef) {
+      selRef.value = this.maneuver.steeringReferencePoint || "rear_axle";
+    }
     this._renderSegmentsListUI();
   }
 
@@ -619,15 +1819,51 @@ export class SweptPathApp {
     const container = document.getElementById("segments-list");
     container.innerHTML = "";
 
+    if (!this.maneuver.segments || this.maneuver.segments.length === 0) {
+      container.innerHTML = `<div style="padding:10px;text-align:center;color:#64748b;font-size:11px;border:1px dashed #334155;border-radius:4px;">No hay tramos configurados. Trace una ruta con ✏️ Trazar ruta o añada un tramo manual.</div>`;
+      return;
+    }
+
+    if (this.trajectoryMode === "spline" && this.viewer2D?.waypoints?.length >= 2) {
+      const nWp = this.viewer2D.waypoints.length;
+      let totalLen = 0;
+      let minR = Infinity;
+      for (const s of this.maneuver.segments) {
+        if (s.type === "straight") totalLen += s.length;
+        else if (s.type === "arc") {
+          totalLen += s.radius * (Math.abs(s.angle) * Math.PI / 180);
+          if (s.radius < minR) minR = s.radius;
+        }
+      }
+      const splineHeader = document.createElement("div");
+      splineHeader.className = "spline-badge-card";
+      splineHeader.style.cssText = "margin-bottom:8px;padding:8px;background:rgba(2,132,199,0.12);border:1px solid #0284c7;border-radius:6px;font-size:11px;";
+      splineHeader.innerHTML = `
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:3px;">
+          <span style="color:#38bdf8;font-weight:600;">⚡ Spline CAD Continua</span>
+          <span style="background:rgba(56,189,248,0.2);color:#38bdf8;font-size:10px;padding:1px 6px;border-radius:3px;font-family:monospace;">${nWp} waypoints</span>
+        </div>
+        <div style="color:#94a3b8;font-size:10.5px;line-height:1.4;">
+          Longitud de eje: <b>${totalLen.toFixed(2)} m</b> · Radio mín.: <b style="color:${minR < (this.viewer2D?.minVehicleTurnRadius || 6.8) ? '#f87171' : '#38bdf8'};">${minR !== Infinity ? minR.toFixed(2) + ' m' : '—'}</b>
+        </div>
+      `;
+      container.appendChild(splineHeader);
+    }
+
     this.maneuver.segments.forEach((seg, idx) => {
       const card = document.createElement("div");
       card.className = "segment-item";
 
       const isStraight = seg.type === "straight";
+      const isSpline = seg.type === "spline";
       const header = document.createElement("div");
       header.className = "segment-item-header";
+      let segTitle = "Curva circular";
+      if (isStraight) segTitle = "Tramo recto";
+      else if (isSpline) segTitle = `Spline CAD continua (${seg.waypoints?.length || 0} pts)`;
+
       header.innerHTML = `
-        <span>#${idx + 1} · ${isStraight ? "Tramo recto" : "Curva circular"}</span>
+        <span>#${idx + 1} · ${segTitle}</span>
         <button type="button" class="btn btn-danger btn-sm" title="Eliminar tramo">✕</button>
       `;
 
@@ -667,21 +1903,39 @@ export class SweptPathApp {
           const val = parseFloat(e.target.value);
           if (Number.isFinite(val) && val > 0) {
             seg.length = val;
-            this.recomputeAll(false);
+            this.scheduleRecompute(120, false);
           }
         });
         body.appendChild(lenWrap);
+      } else if (isSpline) {
+        const splineInfoWrap = document.createElement("div");
+        splineInfoWrap.style.gridColumn = "span 2";
+        const rMinStr = Number.isFinite(seg.minRadius) ? `${seg.minRadius.toFixed(2)} m` : "—";
+        splineInfoWrap.innerHTML = `
+          <label class="form-label">Curvatura y longitud</label>
+          <div style="font-size:11px;color:#94a3b8;padding-top:6px;line-height:1.4;">
+            L = <b>${(seg.totalLength || 0).toFixed(2)} m</b> · R<sub>mín</sub> = <b style="color:#38bdf8;">${rMinStr}</b>
+          </div>
+        `;
+        body.appendChild(splineInfoWrap);
       } else {
         const radWrap = document.createElement("div");
+        const globalRef = this.maneuver.steeringReferencePoint || "rear_axle";
+        const isFront = (seg.steeringReferencePoint || globalRef) === "front_axle";
+        const Lwb = this.vehicle?.tractor?.wheelbase || 3.8;
+        const eqInfo = isFront && seg.radius > Lwb
+          ? ` (Eje motriz calculado: ${Math.sqrt(seg.radius * seg.radius - Lwb * Lwb).toFixed(2)} m)`
+          : "";
+
         radWrap.innerHTML = `
-          <label class="form-label">Radio R (m)</label>
-          <input type="number" step="0.25" min="4.0" max="200" value="${seg.radius}" />
+          <label class="form-label" title="${isFront ? 'Radio referido al centro del eje director delantero (Norma 3.1-IC / Guía Nudos)' : 'Radio referido al centro del eje motriz trasero'}">Radio R (m)${isFront ? ' [Directriz]' : ''}</label>
+          <input type="number" step="0.25" min="2.0" max="200" value="${seg.radius}" title="${isFront ? `Radio eje director = ${seg.radius} m${eqInfo}` : `Radio eje motriz = ${seg.radius} m`}" />
         `;
         radWrap.querySelector("input").addEventListener("input", (e) => {
           const val = parseFloat(e.target.value);
-          if (Number.isFinite(val) && val >= 2.0) {
+          if (Number.isFinite(val) && val >= 1.0) {
             seg.radius = val;
-            this.recomputeAll(false);
+            this.scheduleRecompute(120, false);
           }
         });
 
@@ -694,7 +1948,7 @@ export class SweptPathApp {
           const val = parseFloat(e.target.value);
           if (Number.isFinite(val)) {
             seg.angle = val;
-            this.recomputeAll(false);
+            this.scheduleRecompute(120, false);
           }
         });
 
@@ -708,20 +1962,61 @@ export class SweptPathApp {
     });
   }
 
+  _syncObstacleCardDOM(movedObs) {
+    if (!movedObs) return;
+    const container = document.getElementById("obstacles-list");
+    if (!container) return;
+    const card = Array.from(container.querySelectorAll(".obstacle-item")).find(
+      (el) => el.dataset.obsId === String(movedObs.id)
+    );
+    if (!card) return;
+    const xInput = card.querySelector(".obs-x");
+    const yInput = card.querySelector(".obs-y");
+    if (xInput && document.activeElement !== xInput) xInput.value = movedObs.x ?? 0;
+    if (yInput && document.activeElement !== yInput) yInput.value = movedObs.y ?? 0;
+
+    // Actualizar las insignias de distancia mínima de todos los obstáculos sin recrear el DOM
+    for (const itemEl of container.querySelectorAll(".obstacle-item")) {
+      const obsId = itemEl.dataset.obsId;
+      const badgeSlot = itemEl.querySelector(".obs-badge-slot");
+      if (!badgeSlot) continue;
+      const rep = this.interferenceReport?.obstacleReports?.find((r) => String(r.obstacleId) === obsId);
+      badgeSlot.innerHTML = rep
+        ? `<span class="badge status-${escapeHTML(rep.status)}" style="font-size:10px;">${
+            rep.minDistanceM !== null ? `${rep.minDistanceM.toFixed(2)} m` : "N/E"
+          }</span>`
+        : "";
+    }
+  }
+
   _renderObstaclesListUI() {
     const container = document.getElementById("obstacles-list");
     container.innerHTML = "";
 
+    if (!this.obstacles || this.obstacles.length === 0) {
+      container.innerHTML = `<div style="padding:10px;text-align:center;color:#64748b;font-size:11px;border:1px dashed #334155;border-radius:4px;">Sin obstáculos activos. Se pueden importar desde archivo DXF o añadir manualmente.</div>`;
+      return;
+    }
+
     this.obstacles.forEach((obs, idx) => {
       const card = document.createElement("div");
       card.className = "obstacle-item";
+      card.dataset.obsId = String(obs.id);
 
       // Buscar estado de este obstáculo en el informe de interferencias
       const rep = this.interferenceReport?.obstacleReports?.find((r) => r.obstacleId === obs.id);
       const distBadge = rep
-        ? `<span class="badge status-${rep.status}" style="font-size:10px;">${
+        ? `<span class="badge status-${escapeHTML(rep.status)}" style="font-size:10px;">${
             rep.minDistanceM !== null ? `${rep.minDistanceM.toFixed(2)} m` : "N/E"
           }</span>`
+        : "";
+
+      const canJump = rep && rep.stepIndex !== undefined;
+      const jumpLabel = rep?.distAlongPathM !== undefined
+        ? `📍 Ir al PK (${rep.distAlongPathM.toFixed(1)}m)`
+        : "📍 Ir al PK";
+      const jumpBtnHtml = canJump
+        ? `<button type="button" class="btn btn-sm btn-outline btn-jump-pk" style="padding:2px 7px;font-size:10px;background:rgba(15,23,42,0.7);color:#38bdf8;border-color:#0284c7;font-weight:600;" title="Saltar al punto de mayor aproximación a este obstáculo (${rep.distAlongPathM?.toFixed(1) ?? 0} m) y centrar la vista">${jumpLabel}</button>`
         : "";
 
       const header = document.createElement("div");
@@ -729,10 +2024,11 @@ export class SweptPathApp {
       header.innerHTML = `
         <label style="display:flex;align-items:center;gap:6px;cursor:pointer;">
           <input type="checkbox" class="obs-toggle" ${obs.enabled !== false ? "checked" : ""} />
-          <span>${obs.name}</span>
+          <span>${escapeHTML(obs.name)}</span>
         </label>
         <div style="display:flex;align-items:center;gap:5px;">
-          ${distBadge}
+          ${jumpBtnHtml}
+          <span class="obs-badge-slot">${distBadge}</span>
           <button type="button" class="btn btn-danger btn-sm obs-del" title="Eliminar obstáculo">✕</button>
         </div>
       `;
@@ -749,10 +2045,22 @@ export class SweptPathApp {
         this._renderObstaclesListUI();
       });
 
+      const jumpBtnEl = header.querySelector(".btn-jump-pk");
+      if (jumpBtnEl && rep) {
+        jumpBtnEl.addEventListener("click", () => {
+          this.jumpToFrame(rep.stepIndex, rep.pointOnVehicle || rep.pointOnObstacle);
+          this.showToast(
+            `Visualizando interferencia en PK ${rep.distAlongPathM.toFixed(2)} m (${rep.statusLabel})`,
+            rep.status === "COLLISION" ? "danger" : "warning"
+          );
+        });
+      }
+
       card.appendChild(header);
 
-      // Si el obstáculo tiene posición (x, y) editable (rect, circle, arc_curb)
-      if (obs.shape === "rect" || obs.shape === "circle" || obs.shape === "arc_curb") {
+      // Si el obstáculo es rectangular (por defecto o forma rect/rectangle) (UX-05)
+      const isRect = obs.shape === "rect" || obs.shape === "rectangle" || (!obs.shape && !obs.vertices);
+      if (isRect) {
         const coordsRow = document.createElement("div");
         coordsRow.className = "form-row-3";
         coordsRow.innerHTML = `
@@ -765,10 +2073,32 @@ export class SweptPathApp {
             <input type="number" step="0.25" class="obs-y" value="${obs.y ?? 0}" />
           </div>
           <div>
-            <label class="form-label">${obs.shape === "rect" ? "Largo (m)" : "Radio (m)"}</label>
-            <input type="number" step="0.25" min="0.2" class="obs-dim" value="${
-              obs.shape === "rect" ? obs.length ?? 4 : obs.radius ?? 3
-            }" />
+            <label class="form-label">Largo L (m)</label>
+            <input type="number" step="0.25" min="0.2" class="obs-len" value="${obs.length ?? 4}" />
+          </div>
+        `;
+
+        const propsRow = document.createElement("div");
+        propsRow.className = "form-row-3";
+        propsRow.style.marginTop = "5px";
+        propsRow.innerHTML = `
+          <div>
+            <label class="form-label">Ancho W (m)</label>
+            <input type="number" step="0.25" min="0.2" class="obs-width" value="${obs.width ?? 2}" />
+          </div>
+          <div>
+            <label class="form-label">Giro (°)</label>
+            <input type="number" step="1" min="0" max="360" class="obs-heading" value="${obs.headingDeg ?? 0}" />
+          </div>
+          <div>
+            <label class="form-label">Tipo</label>
+            <select class="obs-type">
+              <option value="building" ${obs.type === "building" ? "selected" : ""}>Edificio</option>
+              <option value="road_edge" ${obs.type === "road_edge" ? "selected" : ""}>Bordillo</option>
+              <option value="loading_dock" ${obs.type === "loading_dock" ? "selected" : ""}>Muelle</option>
+              <option value="restricted_zone" ${obs.type === "restricted_zone" ? "selected" : ""}>Restringida</option>
+              <option value="fence" ${obs.type === "fence" ? "selected" : ""}>Vallado</option>
+            </select>
           </div>
         `;
 
@@ -776,25 +2106,83 @@ export class SweptPathApp {
           const v = parseFloat(e.target.value);
           if (Number.isFinite(v)) {
             obs.x = v;
-            this._recomputeInterferencesOnly();
+            this.scheduleInterferencesRecompute(50);
           }
         });
         coordsRow.querySelector(".obs-y").addEventListener("input", (e) => {
           const v = parseFloat(e.target.value);
           if (Number.isFinite(v)) {
             obs.y = v;
-            this._recomputeInterferencesOnly();
+            this.scheduleInterferencesRecompute(50);
+          }
+        });
+        coordsRow.querySelector(".obs-len").addEventListener("input", (e) => {
+          const v = parseFloat(e.target.value);
+          if (Number.isFinite(v) && v > 0.1) {
+            obs.length = v;
+            this.scheduleInterferencesRecompute(50);
+          }
+        });
+
+        propsRow.querySelector(".obs-width").addEventListener("input", (e) => {
+          const v = parseFloat(e.target.value);
+          if (Number.isFinite(v) && v > 0.1) {
+            obs.width = v;
+            this.scheduleInterferencesRecompute(50);
+          }
+        });
+        propsRow.querySelector(".obs-heading").addEventListener("input", (e) => {
+          const v = parseFloat(e.target.value);
+          if (Number.isFinite(v)) {
+            obs.headingDeg = v;
+            this.scheduleInterferencesRecompute(50);
+          }
+        });
+        propsRow.querySelector(".obs-type").addEventListener("change", (e) => {
+          obs.type = e.target.value;
+          this.scheduleInterferencesRecompute(50);
+        });
+
+        card.appendChild(coordsRow);
+        card.appendChild(propsRow);
+      } else if (obs.shape === "circle" || obs.shape === "arc_curb") {
+        const coordsRow = document.createElement("div");
+        coordsRow.className = "form-row-3";
+        coordsRow.innerHTML = `
+          <div>
+            <label class="form-label">X centro (m)</label>
+            <input type="number" step="0.25" class="obs-x" value="${obs.x ?? 0}" />
+          </div>
+          <div>
+            <label class="form-label">Y centro (m)</label>
+            <input type="number" step="0.25" class="obs-y" value="${obs.y ?? 0}" />
+          </div>
+          <div>
+            <label class="form-label">Radio (m)</label>
+            <input type="number" step="0.25" min="0.2" class="obs-dim" value="${obs.radius ?? 3}" />
+          </div>
+        `;
+        coordsRow.querySelector(".obs-x").addEventListener("input", (e) => {
+          const v = parseFloat(e.target.value);
+          if (Number.isFinite(v)) {
+            obs.x = v;
+            this.scheduleInterferencesRecompute(50);
+          }
+        });
+        coordsRow.querySelector(".obs-y").addEventListener("input", (e) => {
+          const v = parseFloat(e.target.value);
+          if (Number.isFinite(v)) {
+            obs.y = v;
+            this.scheduleInterferencesRecompute(50);
           }
         });
         coordsRow.querySelector(".obs-dim").addEventListener("input", (e) => {
           const v = parseFloat(e.target.value);
           if (Number.isFinite(v) && v > 0.1) {
-            if (obs.shape === "rect") obs.length = v;
-            else obs.radius = v;
-            this._recomputeInterferencesOnly();
+            obs.radius = v;
+            this.scheduleInterferencesRecompute(50);
           }
         });
-
         card.appendChild(coordsRow);
       }
 
@@ -804,94 +2192,284 @@ export class SweptPathApp {
 
   _recomputeInterferencesOnly() {
     if (!this.simResult) return;
-    this.interferenceReport = evaluateObstacleInterferences(
-      this.simResult,
-      this.obstacles,
-      this.safetyMarginM
+    this.workerClient.recomputeInterferences(
+      {
+        simResult: this.simResult,
+        obstacles: this.obstacles,
+        safetyMarginM: this.safetyMarginM
+      },
+      (err, result) => {
+        if (err) {
+          console.error("Error al recalcular interferencias:", err);
+          return;
+        }
+        this.interferenceReport = result.interferenceReport;
+        this.viewer2D.setData({
+          vehicle: this.vehicle,
+          simResult: this.simResult,
+          obstacles: this.obstacles,
+          interferenceReport: this.interferenceReport,
+          cadBackgroundEntities: this.cadBackgroundEntities
+        });
+        this.viewer3D.updateObstaclesAndInterferences(this.obstacles, this.interferenceReport);
+        this._updateTopTelemetryBar();
+        this._renderPKCurves();
+      }
     );
-    this.viewer2D.setData({
-      vehicle: this.vehicle,
-      simResult: this.simResult,
-      obstacles: this.obstacles,
-      interferenceReport: this.interferenceReport,
-      cadBackgroundEntities: this.cadBackgroundEntities
-    });
-    this.viewer3D.setData({
-      vehicle: this.vehicle,
-      simResult: this.simResult,
-      obstacles: this.obstacles,
-      interferenceReport: this.interferenceReport
-    });
-    this._updateTopTelemetryBar();
   }
 
   recomputeAll(fitCamera = false) {
     this._updateVehicleSummaryAndValidationUI();
+    this._scheduleAutosave();
 
-    this.simResult = buildCompleteSimulationResult(this.vehicle, this.maneuver, {
-      ...this.discretization,
-      safetyMarginM: this.safetyMarginM
-    });
+    // Si no hay tramos definidos en la maniobra
+    if (!this.maneuver || !this.maneuver.segments || this.maneuver.segments.length === 0) {
+      const hasSceneContent =
+        (this.cadBackgroundEntities && this.cadBackgroundEntities.length > 0) ||
+        (this.obstacles && this.obstacles.length > 0) ||
+        (this.viewer2D && this.viewer2D.waypoints && this.viewer2D.waypoints.length > 0) ||
+        (this.viewer2D && this.viewer2D.layers && this.viewer2D.layers.pnoa && this.viewer2D.pnoaConfig && this.viewer2D.pnoaConfig.enabled);
 
-    this.interferenceReport = evaluateObstacleInterferences(
-      this.simResult,
-      this.obstacles,
-      this.safetyMarginM
+      // Si no hay contenido ni plano de fondo en la escena, mantener el visor completamente vacío
+      if (!hasSceneContent) {
+        this.simResult = null;
+        this.interferenceReport = null;
+
+        const slider = document.getElementById("slider-timeline");
+        if (slider) {
+          slider.value = 0;
+          slider.max = 0;
+        }
+        const pkEl = document.getElementById("timeline-pk-val");
+        if (pkEl) pkEl.textContent = "PK 0.00 m";
+
+        this.viewer2D.setData({
+          vehicle: this.vehicle,
+          simResult: null,
+          obstacles: [],
+          interferenceReport: null,
+          cadBackgroundEntities: []
+        });
+
+        this.viewer3D.setData({
+          vehicle: this.vehicle,
+          simResult: null,
+          obstacles: [],
+          interferenceReport: null,
+          cadBackgroundEntities: []
+        });
+
+        if (fitCamera) {
+          this.viewer2D.fitToScene();
+          this.viewer3D.fitToScene();
+        }
+
+        this._updateTopTelemetryBar();
+        this._renderObstaclesListUI();
+        this._renderSegmentsListUI();
+        this._renderPKCurves();
+        this._setComputingStatus(false);
+        return;
+      }
+
+      // Si hay plano CAD, GeoJSON u obstáculos, generar estado base en reposo para ubicar el vehículo en el origen
+      const idleSimResult = buildCompleteSimulationResult(
+        this.vehicle,
+        {
+          startPose: this.maneuver?.startPose || { x: 0, y: 0, headingDeg: 0, initialArticulationDeg: 0 },
+          steeringReferencePoint: this.maneuver?.steeringReferencePoint || "rear_axle",
+          segments: []
+        },
+        {
+          safetyMarginM: this.safetyMarginM
+        }
+      );
+      this.simResult = idleSimResult;
+      this.interferenceReport = null;
+
+      const slider = document.getElementById("slider-timeline");
+      if (slider) {
+        slider.value = 0;
+        slider.max = 0;
+      }
+      const pkEl = document.getElementById("timeline-pk-val");
+      if (pkEl) pkEl.textContent = "PK 0.00 m";
+
+      this.viewer2D.setData({
+        vehicle: this.vehicle,
+        simResult: this.simResult,
+        obstacles: this.obstacles,
+        interferenceReport: null,
+        cadBackgroundEntities: this.cadBackgroundEntities
+      });
+
+      this.viewer3D.setData({
+        vehicle: this.vehicle,
+        simResult: this.simResult,
+        obstacles: this.obstacles,
+        interferenceReport: null,
+        cadBackgroundEntities: this.cadBackgroundEntities,
+        waypoints: this.viewer2D?.waypoints
+      });
+
+      if (fitCamera) {
+        this.viewer2D.fitToScene();
+        this.viewer3D.fitToScene();
+      }
+
+      this._updateTopTelemetryBar();
+      this._renderObstaclesListUI();
+      this._renderSegmentsListUI();
+      this._renderPKCurves();
+      this._setComputingStatus(false);
+      return;
+    }
+
+    this._setComputingStatus(true);
+    this.workerClient.recomputeAll(
+      {
+        vehicle: this.vehicle,
+        maneuver: this.maneuver,
+        options: {
+          ...this.discretization,
+          steeringReferencePoint: this.maneuver.steeringReferencePoint || "rear_axle",
+          safetyMarginM: this.safetyMarginM
+        },
+        obstacles: this.obstacles,
+        safetyMarginM: this.safetyMarginM
+      },
+      (err, result) => {
+        this._setComputingStatus(false);
+        if (err) {
+          console.error("Error en recálculo general:", err);
+          return;
+        }
+        this.simResult = result.simResult;
+        this.interferenceReport = result.interferenceReport;
+
+        const totalStates = this.simResult.states.length;
+        const slider = document.getElementById("slider-timeline");
+        if (slider) {
+          slider.max = Math.max(0, totalStates - 1);
+          if (this.currentFrameFloat >= totalStates) {
+            this.currentFrameFloat = Math.max(0, totalStates - 1);
+          }
+          slider.value = Math.floor(this.currentFrameFloat);
+        }
+
+        this.viewer2D.setData({
+          vehicle: this.vehicle,
+          simResult: this.simResult,
+          obstacles: this.obstacles,
+          interferenceReport: this.interferenceReport,
+          cadBackgroundEntities: this.cadBackgroundEntities
+        });
+
+        this.viewer3D.setData({
+          vehicle: this.vehicle,
+          simResult: this.simResult,
+          obstacles: this.obstacles,
+          interferenceReport: this.interferenceReport,
+          cadBackgroundEntities: this.cadBackgroundEntities,
+          waypoints: this.viewer2D?.waypoints
+        });
+
+        if (fitCamera) {
+          this.viewer2D.fitToScene();
+          this.viewer3D.fitToScene();
+        }
+
+        this._syncFrameToViewers(Math.floor(this.currentFrameFloat));
+        this._updateTopTelemetryBar();
+        this._renderObstaclesListUI();
+        this._renderPKCurves();
+      }
     );
-
-    const totalStates = this.simResult.states.length;
-    const slider = document.getElementById("slider-timeline");
-    slider.max = Math.max(0, totalStates - 1);
-    if (this.currentFrameFloat >= totalStates) {
-      this.currentFrameFloat = Math.max(0, totalStates - 1);
-    }
-    slider.value = Math.floor(this.currentFrameFloat);
-
-    this.viewer2D.setData({
-      vehicle: this.vehicle,
-      simResult: this.simResult,
-      obstacles: this.obstacles,
-      interferenceReport: this.interferenceReport,
-      cadBackgroundEntities: this.cadBackgroundEntities
-    });
-
-    this.viewer3D.setData({
-      vehicle: this.vehicle,
-      simResult: this.simResult,
-      obstacles: this.obstacles,
-      interferenceReport: this.interferenceReport
-    });
-
-    if (fitCamera) {
-      this.viewer2D.fitToScene();
-      this.viewer3D.fitToScene();
-    }
-
-    this._syncFrameToViewers(Math.floor(this.currentFrameFloat));
-    this._updateTopTelemetryBar();
-    this._renderObstaclesListUI();
   }
 
   _updateTopTelemetryBar() {
-    if (!this.simResult) return;
-    const sum = this.simResult.summary;
-    document.getElementById("kpi-swept-width").textContent = `${sum.maxSweptWidthM.toFixed(2)} m`;
-    document.getElementById("kpi-total-dist").textContent = `${sum.totalDistanceM.toFixed(2)} m`;
-    document.getElementById("kpi-max-steer").textContent = `${sum.maxSteerAngleDeg.toFixed(1)}° / ${this.vehicle.tractor.maxSteerAngleDeg}°`;
-    document.getElementById("kpi-max-artic").textContent = `${sum.maxArticulationAngleDeg.toFixed(1)}° / ${this.vehicle.limits?.maxArticulationAngleDeg || 85}°`;
-
-    const rep = this.interferenceReport;
+    const sweptEl = document.getElementById("kpi-swept-width");
+    const distEl = document.getElementById("kpi-total-dist");
+    const steerEl = document.getElementById("kpi-max-steer");
+    const articEl = document.getElementById("kpi-max-artic");
     const clearanceEl = document.getElementById("kpi-min-clearance");
-    if (rep && rep.minClearanceM !== null) {
-      clearanceEl.textContent = `${rep.minClearanceM.toFixed(2)} m`;
-    } else {
-      clearanceEl.textContent = "—";
+    const statusBadge = document.getElementById("global-interference-badge");
+    const btnJump = document.getElementById("btn-jump-critical-pk");
+
+    if (!this.simResult) {
+      if (sweptEl) sweptEl.textContent = "—";
+      if (distEl) distEl.textContent = "—";
+      if (steerEl) steerEl.textContent = `0.0° / ${this.vehicle?.tractor?.maxSteerAngleDeg || 38}°`;
+      if (articEl) articEl.textContent = this.vehicle?.hasTrailer ? "0.0°" : "N/A (Rígido)";
+      if (clearanceEl) clearanceEl.textContent = "—";
+      if (statusBadge) {
+        statusBadge.className = "status-banner-pill status-CLEAR";
+        statusBadge.textContent = "LISTO (SIN SIMULACIÓN ACTIVA)";
+        statusBadge.style.cursor = "default";
+        statusBadge.onclick = null;
+      }
+      if (btnJump) {
+        btnJump.textContent = "📍 Ir al PK crítico";
+        btnJump.title = "Situar la simulación en el punto de máxima proximidad u obstáculo crítico";
+      }
+      return;
     }
 
-    const statusBadge = document.getElementById("global-interference-badge");
-    if (rep) {
+    const sum = this.simResult.summary;
+    if (sweptEl) sweptEl.textContent = `${sum.maxSweptWidthM.toFixed(2)} m`;
+    if (distEl) distEl.textContent = `${sum.totalDistanceM.toFixed(2)} m`;
+    if (steerEl) steerEl.textContent = `${sum.maxSteerAngleDeg.toFixed(1)}° / ${this.vehicle.tractor.maxSteerAngleDeg}°`;
+    if (articEl) articEl.textContent = this.vehicle.hasTrailer
+      ? `${sum.maxArticulationAngleDeg.toFixed(1)}° / ${this.vehicle.limits?.maxArticulationAngleDeg || 85}°`
+      : "N/A (Rígido)";
+
+    const rep = this.interferenceReport;
+    if (clearanceEl) {
+      if (rep && rep.minClearanceM !== null) {
+        clearanceEl.textContent = `${rep.minClearanceM.toFixed(2)} m`;
+      } else {
+        clearanceEl.textContent = "—";
+      }
+    }
+
+    if (btnJump) {
+      if (rep && rep.criticalInteraction && rep.criticalInteraction.stepIndex !== undefined) {
+        btnJump.textContent = `📍 Ir al PK (${rep.criticalInteraction.distAlongPathM.toFixed(1)} m)`;
+        btnJump.title = `Situar simulación en el punto de máxima proximidad (PK ${rep.criticalInteraction.distAlongPathM.toFixed(2)} m · ${rep.criticalInteraction.name})`;
+      } else {
+        btnJump.textContent = "📍 Ir al PK crítico";
+        btnJump.title = "Situar la simulación en el punto de máxima proximidad u obstáculo crítico";
+      }
+    }
+
+    if (statusBadge && rep) {
       statusBadge.className = `status-banner-pill status-${rep.globalStatus}`;
       statusBadge.textContent = rep.globalStatusLabel;
+      if (rep.criticalInteraction && rep.criticalInteraction.stepIndex !== undefined && rep.globalStatus !== "CLEAR") {
+        statusBadge.style.cursor = "pointer";
+        statusBadge.title = `Haga clic para saltar al punto crítico en PK ${rep.criticalInteraction.distAlongPathM?.toFixed(2) ?? 0} m`;
+        statusBadge.onclick = () => {
+          this.jumpToFrame(
+            rep.criticalInteraction.stepIndex,
+            rep.criticalInteraction.pointOnVehicle || rep.criticalInteraction.pointOnObstacle
+          );
+          this.showToast(
+            `Punto crítico: PK ${rep.criticalInteraction.distAlongPathM.toFixed(2)} m (${rep.criticalInteraction.statusLabel})`,
+            rep.globalStatus === "COLLISION" ? "danger" : "warning"
+          );
+        };
+      } else {
+        statusBadge.style.cursor = "default";
+        statusBadge.title = "";
+        statusBadge.onclick = null;
+      }
+    } else if (statusBadge && !rep) {
+      statusBadge.className = "status-banner-pill status-CLEAR";
+      statusBadge.textContent = (!this.maneuver || !this.maneuver.segments || this.maneuver.segments.length === 0)
+        ? "LISTO (VEHÍCULO EN REPOSO)"
+        : "SIN INTERFERENCIAS DETECTADAS";
+      statusBadge.style.cursor = "default";
+      statusBadge.onclick = null;
     }
   }
 
@@ -912,22 +2490,43 @@ export class SweptPathApp {
       const articVal = Number(st.articulationAngleDeg ?? st.articulationDeg ?? 0).toFixed(1);
       labelEl.textContent = `PK ${st.dist.toFixed(2)} m / ${this.simResult.summary.totalDistanceM.toFixed(2)} m (${dirBadge}) · δ=${steerVal}° · γ=${articVal}°`;
     }
+
+    if (this.isCurvesPanelOpen) {
+      this._updatePKCursor(clamped);
+    }
   }
 
   _updatePlayButtonUI() {
     const btn = document.getElementById("btn-play-toggle");
     btn.textContent = this.isPlaying ? "⏸ Pausar" : "▶ Reproducir";
+    if (this.isPlaying) {
+      this._startAnimationLoop();
+    } else if (this._animRafId !== null) {
+      cancelAnimationFrame(this._animRafId);
+      this._animRafId = null;
+      this.lastAnimTime = 0;
+    }
   }
 
   // ---------------------------------------------------------------------------
-  // Módulo de Importación DXF (Detección automática de capas y selector asistido)
+  // Módulo de Importación CAD / GIS (DXF y GeoJSON con georreferenciación PNOA)
   // ---------------------------------------------------------------------------
   _initDxfImporterUI() {
     const fileInput = document.getElementById("inp-dxf-file");
     const dropZone = document.getElementById("dxf-drop-zone");
 
     if (dropZone && fileInput) {
+      dropZone.setAttribute("tabindex", "0");
+      dropZone.setAttribute("role", "button");
+      dropZone.setAttribute("aria-label", "Zona de carga de archivo CAD DXF o GeoJSON. Pulse Intro o Espacio para seleccionar archivo");
+
       dropZone.addEventListener("click", () => fileInput.click());
+      dropZone.addEventListener("keydown", (e) => {
+        if (e.key === "Enter" || e.key === " ") {
+          e.preventDefault();
+          fileInput.click();
+        }
+      });
 
       dropZone.addEventListener("dragover", (e) => {
         e.preventDefault();
@@ -940,16 +2539,135 @@ export class SweptPathApp {
         e.preventDefault();
         dropZone.classList.remove("dragover");
         if (e.dataTransfer && e.dataTransfer.files && e.dataTransfer.files[0]) {
-          this._loadDxfFile(e.dataTransfer.files[0]);
+          this._loadVectorFile(e.dataTransfer.files[0]);
         }
       });
 
       fileInput.addEventListener("change", (e) => {
         if (e.target.files && e.target.files[0]) {
-          this._loadDxfFile(e.target.files[0]);
+          this._loadVectorFile(e.target.files[0]);
         }
       });
     }
+  }
+
+  _loadVectorFile(file) {
+    if (!file) return;
+    const nameLower = (file.name || "").toLowerCase();
+    if (nameLower.endsWith(".geojson") || nameLower.endsWith(".json")) {
+      this._loadGeoJsonFile(file);
+    } else {
+      this._loadDxfFile(file);
+    }
+  }
+
+  _loadGeoJsonFile(file) {
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = (e) => {
+      try {
+        const text = e.target.result;
+        const scenario = buildScenarioFromGeoJSON(text);
+
+        // 1. Registrar como escenario personalizado en el selector
+        this.selectedScenarioId = "custom_geojson";
+        const scSelect = document.getElementById("select-scenario");
+        if (scSelect) {
+          let customOpt = scSelect.querySelector("option[value='custom_geojson']");
+          if (!customOpt) {
+            customOpt = document.createElement("option");
+            customOpt.value = "custom_geojson";
+            scSelect.appendChild(customOpt);
+          }
+          customOpt.textContent = `GeoJSON: ${file.name}`;
+          scSelect.value = "custom_geojson";
+        }
+
+        // 2. Obstáculos y entidades de fondo CAD
+        this.obstacles = scenario.obstacles || [];
+        this._renderObstaclesListUI();
+        this.cadBackgroundEntities = scenario.backgroundEntities || [];
+
+        // 3. Maniobra (eje deducido o vehículo en reposo en el origen del plano)
+        if (scenario.maneuver && scenario.maneuver.segments && scenario.maneuver.segments.length > 0) {
+          this.maneuver = scenario.maneuver;
+          this.viewer2D.clearWaypoints(true);
+        } else {
+          this.maneuver = {
+            startPose: {
+              x: scenario.bounds ? Number((scenario.bounds.minX + 5).toFixed(2)) : 0,
+              y: scenario.bounds ? Number((scenario.bounds.minY + 5).toFixed(2)) : 0,
+              headingDeg: 0,
+              initialArticulationDeg: 0
+            },
+            segments: []
+          };
+          this.viewer2D.clearWaypoints(true);
+        }
+        this._populateManeuverInputs();
+        this._renderSegmentsListUI();
+
+        // 4. Georreferenciación recíproca con PNOA (IGN)
+        if (scenario.pnoaConfig) {
+          this.viewer2D.setPnoaConfig(scenario.pnoaConfig);
+          const chkPnoa = document.getElementById("chk-layer-pnoa");
+          if (chkPnoa) chkPnoa.checked = true;
+          const btnPnoa = document.getElementById("btn-toggle-pnoa");
+          if (btnPnoa) {
+            btnPnoa.classList.add("active");
+            btnPnoa.style.background = "rgba(2, 132, 199, 0.4)";
+          }
+          const modalLat = document.getElementById("inp-pnoa-lat");
+          const modalLon = document.getElementById("inp-pnoa-lon");
+          if (modalLat) modalLat.value = scenario.pnoaConfig.centerLat;
+          if (modalLon) modalLon.value = scenario.pnoaConfig.centerLon;
+        }
+
+        // 5. Asignar inmediatamente a los visores 2D y 3D
+        this.viewer2D.setData({
+          vehicle: this.vehicle,
+          simResult: this.simResult,
+          obstacles: this.obstacles,
+          interferenceReport: this.interferenceReport,
+          cadBackgroundEntities: this.cadBackgroundEntities
+        });
+
+        this.viewer3D.setData({
+          vehicle: this.vehicle,
+          simResult: this.simResult,
+          obstacles: this.obstacles,
+          interferenceReport: this.interferenceReport,
+          cadBackgroundEntities: this.cadBackgroundEntities,
+          waypoints: this.viewer2D?.waypoints
+        });
+
+        // 6. Recalcular simulación cinemática o encuadrar en reposo
+        if (this.maneuver && this.maneuver.segments && this.maneuver.segments.length > 0) {
+          this.recomputeAll(true);
+        } else {
+          this.recomputeAll(false);
+          this.viewer2D.fitToScene();
+          this.viewer3D.fitToScene();
+        }
+
+        this.history.pushState(this.getSnapshot());
+        this._updateUndoRedoButtonsUI();
+
+        const totalEnts = this.obstacles.length + this.cadBackgroundEntities.length;
+        this.showToast(
+          `Plano GeoJSON cargado (${totalEnts} elementos). Ortofoto aérea oficial PNOA georreferenciada y activada.`,
+          "success",
+          4000
+        );
+      } catch (err) {
+        console.error("Error al procesar archivo GeoJSON:", err);
+        this.showToast(`Error al procesar el archivo GeoJSON: ${err.message}`, "danger");
+      }
+    };
+    reader.onerror = () => {
+      this.showToast("No se pudo leer el archivo GeoJSON seleccionado.", "danger");
+    };
+    reader.readAsText(file);
   }
 
   _loadDxfFile(file) {
@@ -960,7 +2678,7 @@ export class SweptPathApp {
         const text = e.target.result;
         const parsed = parseDXF(text);
         if (!parsed.layers || parsed.layers.length === 0) {
-          alert("El archivo DXF no contiene capas ni entidades legibles.");
+          this.showToast("El archivo DXF no contiene capas ni entidades legibles.", "warning");
           return;
         }
         this.currentParsedDXF = parsed;
@@ -968,11 +2686,11 @@ export class SweptPathApp {
         this._showDxfLayerMappingModal(parsed, suggested, file.name);
       } catch (err) {
         console.error("Error al procesar archivo DXF:", err);
-        alert(`Error al procesar el archivo DXF: ${err.message}`);
+        this.showToast(`Error al procesar el archivo DXF: ${err.message}`, "danger");
       }
     };
     reader.onerror = () => {
-      alert("No se pudo leer el archivo seleccionado.");
+      this.showToast("No se pudo leer el archivo seleccionado.", "danger");
     };
     reader.readAsText(file);
   }
@@ -988,12 +2706,13 @@ export class SweptPathApp {
     const layers = parsedDxf.layers;
 
     const buildOptions = (selectedVal, noneLabel = "-- Ninguna (Omitir) --") => {
-      let html = `<option value="">${noneLabel}</option>`;
+      let html = `<option value="">${escapeHTML(noneLabel)}</option>`;
       for (const l of layers) {
         const stats = parsedDxf.layerStats[l];
         const count = stats ? ` (${stats.count} ent.)` : "";
         const isSel = l === selectedVal ? "selected" : "";
-        html += `<option value="${l}" ${isSel}>${l}${count}</option>`;
+        const safeL = escapeHTML(l);
+        html += `<option value="${safeL}" ${isSel}>${safeL}${count}</option>`;
       }
       return html;
     };
@@ -1004,7 +2723,8 @@ export class SweptPathApp {
         const stats = parsedDxf.layerStats[l];
         const count = stats ? ` (${stats.count})` : "";
         const isSel = selectedList.includes(l) ? "selected" : "";
-        html += `<option value="${l}" ${isSel}>${l}${count}</option>`;
+        const safeL = escapeHTML(l);
+        html += `<option value="${safeL}" ${isSel}>${safeL}${count}</option>`;
       }
       return html;
     };
@@ -1017,11 +2737,15 @@ export class SweptPathApp {
       ? `<span class="layer-match-badge">✓ ${suggested.obstacleLayers.length} capa(s) sugeridas</span>`
       : "";
 
+    backdrop.setAttribute("role", "dialog");
+    backdrop.setAttribute("aria-modal", "true");
+    backdrop.setAttribute("aria-labelledby", "modal-dxf-title");
+
     backdrop.innerHTML = `
       <div class="modal-dialog">
         <div class="modal-header">
-          <h3>📂 Importación de Plano CAD DXF: ${fileName}</h3>
-          <button type="button" class="btn btn-sm btn-outline" id="btn-modal-close">✕</button>
+          <h3 id="modal-dxf-title">📂 Importación de Plano CAD DXF: ${escapeHTML(fileName)}</h3>
+          <button type="button" class="btn btn-sm btn-outline" id="btn-modal-close" aria-label="Cerrar ventana">✕</button>
         </div>
         <div class="modal-body">
           <p style="margin-top:0;margin-bottom:12px;color:#94a3b8;font-size:11px;">
@@ -1098,7 +2822,17 @@ export class SweptPathApp {
 
     document.body.appendChild(backdrop);
 
-    const closeModal = () => backdrop.remove();
+    const onKeydownModal = (e) => {
+      if (e.key === "Escape") {
+        closeModal();
+      }
+    };
+    window.addEventListener("keydown", onKeydownModal);
+
+    const closeModal = () => {
+      window.removeEventListener("keydown", onKeydownModal);
+      backdrop.remove();
+    };
     document.getElementById("btn-modal-close").addEventListener("click", closeModal);
     document.getElementById("btn-modal-cancel").addEventListener("click", closeModal);
 
@@ -1124,51 +2858,564 @@ export class SweptPathApp {
       };
 
       try {
-        const scenario = buildScenarioFromDXF(parsedDxf, mapping, { direction, agreementRadius });
+        const scenario = buildScenarioFromDXF(parsedDxf, mapping, {
+          direction,
+          agreementRadius,
+          scale: parsedDxf.suggestedScale || 1.0
+        });
 
-        if (scenario.maneuver) {
+        if (scenario.maneuver && scenario.maneuver.segments && scenario.maneuver.segments.length > 0) {
           this.maneuver = scenario.maneuver;
+          this._populateManeuverInputs();
+          this._renderSegmentsListUI();
+        } else {
+          // Si el plano no incluye capa de trayectoria, se limpia la maniobra previa
+          // para dejar el plano CAD listo en el visor para trazar la ruta con ✏️ Trazar ruta
+          this.maneuver = {
+            startPose: {
+              x: scenario.bounds ? Number((scenario.bounds.minX + 5).toFixed(2)) : 0,
+              y: scenario.bounds ? Number((scenario.bounds.minY + 5).toFixed(2)) : 0,
+              headingDeg: 0,
+              initialArticulationDeg: 0
+            },
+            segments: []
+          };
+          this.simResult = null;
+          this.interferenceReport = null;
           this._populateManeuverInputs();
           this._renderSegmentsListUI();
         }
 
-        if (scenario.obstacles.length > 0) {
-          this.obstacles = scenario.obstacles;
-          this._renderObstaclesListUI();
-        }
+        this.obstacles = scenario.obstacles || [];
+        this._renderObstaclesListUI();
 
         this.cadBackgroundEntities = scenario.backgroundEntities || [];
 
-        closeModal();
-        this.recomputeAll(true);
+        // Asignar inmediatamente los datos a los visores para renderizado instantáneo del plano CAD
+        this.viewer2D.setData({
+          vehicle: this.vehicle,
+          simResult: this.simResult,
+          obstacles: this.obstacles,
+          interferenceReport: this.interferenceReport,
+          cadBackgroundEntities: this.cadBackgroundEntities
+        });
 
-        if (scenario.bounds && this.viewer2D) {
-          setTimeout(() => this.viewer2D.fitToScene(), 50);
+        this.viewer3D.setData({
+          vehicle: this.vehicle,
+          simResult: this.simResult,
+          obstacles: this.obstacles,
+          interferenceReport: this.interferenceReport,
+          cadBackgroundEntities: this.cadBackgroundEntities,
+          waypoints: this.viewer2D?.waypoints
+        });
+
+        closeModal();
+
+        // Si hay una maniobra válida, ejecutar simulación cinemática completa
+        if (this.maneuver && this.maneuver.segments && this.maneuver.segments.length > 0) {
+          this.recomputeAll(true);
+        } else {
+          this.viewer2D.fitToScene();
+          this.viewer3D.fitToScene();
+          this._updateTopTelemetryBar();
+          const totalEnts = this.cadBackgroundEntities.length + this.obstacles.length;
+          this.showToast(`Plano CAD cargado con éxito (${totalEnts} elementos geométricos). Puede trazar una ruta sobre el plano con el botón ✏️ Trazar ruta.`, "success");
         }
       } catch (err) {
         console.error("Error al construir escenario desde DXF:", err);
-        alert(`Error al generar la simulación desde el DXF: ${err.message}`);
+        this.showToast(`Error al generar la simulación desde el DXF: ${err.message}`, "danger");
       }
     });
   }
 
+  _setupPnoaUI() {
+    const btnTogglePnoa = document.getElementById("btn-toggle-pnoa");
+    const btnConfigPnoa = document.getElementById("btn-config-pnoa");
+    const chkLayerPnoa = document.getElementById("chk-layer-pnoa");
+    const modalPnoa = document.getElementById("modal-pnoa-config");
+    const btnCloseModal = document.getElementById("btn-close-pnoa-modal");
+    const btnSaveClose = document.getElementById("btn-pnoa-save-close");
+    const chkActive = document.getElementById("modal-chk-pnoa-active");
+    const sliderOpacity = document.getElementById("slider-pnoa-opacity");
+    const lblOpacity = document.getElementById("lbl-pnoa-opacity-val");
+    const inpSearch = document.getElementById("inp-pnoa-search");
+    const btnSearch = document.getElementById("btn-pnoa-search");
+    const searchStatus = document.getElementById("pnoa-search-status");
+    const btnApplyCoords = document.getElementById("btn-pnoa-apply-coords");
+    const btnRecenter = document.getElementById("btn-pnoa-recenter-view");
+
+    const syncPnoaButtonState = () => {
+      const active = Boolean(this.viewer2D.layers.pnoa && this.viewer2D.pnoaConfig.enabled);
+      if (btnTogglePnoa) {
+        btnTogglePnoa.classList.toggle("active", active);
+        btnTogglePnoa.style.borderColor = active ? "#0284c7" : "#334155";
+        btnTogglePnoa.style.color = active ? "#38bdf8" : "#94a3b8";
+        btnTogglePnoa.style.background = active ? "rgba(2, 132, 199, 0.28)" : "rgba(15,23,42,0.85)";
+      }
+      if (chkLayerPnoa) {
+        chkLayerPnoa.checked = active;
+      }
+      if (chkActive) {
+        chkActive.checked = active;
+      }
+    };
+
+    if (btnTogglePnoa) {
+      btnTogglePnoa.addEventListener("click", () => {
+        const next = !this.viewer2D.layers.pnoa;
+        this.viewer2D.setPnoaConfig({ enabled: next });
+        syncPnoaButtonState();
+        this.showToast(next ? "🛰️ Capa de ortofotografía aérea PNOA activada." : "🛰️ Ortofoto PNOA desactivada.", "info");
+      });
+    }
+
+    if (chkLayerPnoa) {
+      chkLayerPnoa.addEventListener("change", () => {
+        this.viewer2D.setPnoaConfig({ enabled: chkLayerPnoa.checked });
+        syncPnoaButtonState();
+      });
+    }
+
+    const openPnoaModal = () => {
+      if (!modalPnoa) return;
+      if (chkActive) chkActive.checked = Boolean(this.viewer2D.layers.pnoa && this.viewer2D.pnoaConfig.enabled);
+      const op = Math.round((this.viewer2D.pnoaConfig.opacity || 0.8) * 100);
+      if (sliderOpacity) sliderOpacity.value = op;
+      if (lblOpacity) lblOpacity.textContent = `${op}%`;
+
+      const inpLat = document.getElementById("inp-pnoa-lat");
+      const inpLon = document.getElementById("inp-pnoa-lon");
+      if (inpLat) inpLat.value = (this.viewer2D.pnoaConfig.centerLat || 40.3872).toFixed(5);
+      if (inpLon) inpLon.value = (this.viewer2D.pnoaConfig.centerLon || -3.8785).toFixed(5);
+
+      if (typeof modalPnoa.showModal === "function") {
+        modalPnoa.showModal();
+      } else {
+        modalPnoa.style.display = "flex";
+      }
+    };
+
+    const closePnoaModal = () => {
+      if (!modalPnoa) return;
+      if (typeof modalPnoa.close === "function") {
+        modalPnoa.close();
+      } else {
+        modalPnoa.style.display = "none";
+      }
+    };
+
+    if (btnConfigPnoa) {
+      btnConfigPnoa.addEventListener("click", openPnoaModal);
+    }
+    if (btnCloseModal) {
+      btnCloseModal.addEventListener("click", closePnoaModal);
+    }
+    if (btnSaveClose) {
+      btnSaveClose.addEventListener("click", () => {
+        if (chkActive) {
+          this.viewer2D.setPnoaConfig({ enabled: chkActive.checked });
+          syncPnoaButtonState();
+        }
+        closePnoaModal();
+      });
+    }
+
+    if (chkActive) {
+      chkActive.addEventListener("change", () => {
+        this.viewer2D.setPnoaConfig({ enabled: chkActive.checked });
+        syncPnoaButtonState();
+      });
+    }
+
+    if (sliderOpacity) {
+      sliderOpacity.addEventListener("input", () => {
+        const val = parseInt(sliderOpacity.value, 10) || 80;
+        if (lblOpacity) lblOpacity.textContent = `${val}%`;
+        this.viewer2D.setPnoaConfig({ opacity: val / 100 });
+      });
+    }
+
+    // Ubicaciones de prueba rápida (presets PNOA)
+    const presetButtons = document.querySelectorAll(".btn-pnoa-preset");
+    presetButtons.forEach((btn) => {
+      btn.addEventListener("click", () => {
+        const lat = parseFloat(btn.dataset.lat);
+        const lon = parseFloat(btn.dataset.lon);
+        const zone = parseInt(btn.dataset.zone, 10) || 30;
+        const utmX = parseFloat(btn.dataset.x) || 0;
+        const utmY = parseFloat(btn.dataset.y) || 0;
+        const name = btn.dataset.name || "Ubicación";
+
+        this.applyPnoaLocation(lat, lon, name, zone, utmX, utmY);
+      });
+    });
+
+    // Buscador Toponímico OpenStreetMap (España) en el Visor 2D y en el Modal
+    this._setupToponymSearch(syncPnoaButtonState);
+
+    // Aplicar coordenadas manuales
+    if (btnApplyCoords) {
+      btnApplyCoords.addEventListener("click", () => {
+        const inpLat = document.getElementById("inp-pnoa-lat");
+        const inpLon = document.getElementById("inp-pnoa-lon");
+        const inpUtmX = document.getElementById("inp-pnoa-utmx");
+        const inpUtmY = document.getElementById("inp-pnoa-utmy");
+        const selHuso = document.getElementById("sel-pnoa-huso");
+
+        const utmX = parseFloat(inpUtmX?.value);
+        const utmY = parseFloat(inpUtmY?.value);
+        const zone = parseInt(selHuso?.value, 10) || 30;
+
+        if (Number.isFinite(utmX) && Number.isFinite(utmY) && utmX > 10000 && utmY > 10000) {
+          this.viewer2D.setPnoaLocationFromUtm(utmX, utmY, zone);
+        } else {
+          const lat = parseFloat(inpLat?.value);
+          const lon = parseFloat(inpLon?.value);
+          if (Number.isFinite(lat) && Number.isFinite(lon)) {
+            this.viewer2D.setPnoaConfig({
+              enabled: true,
+              centerLat: lat,
+              centerLon: lon,
+              anchorWorldX: 0.0,
+              anchorWorldY: 0.0
+            });
+          }
+        }
+        syncPnoaButtonState();
+        this.viewer2D.camX = 0;
+        this.viewer2D.camY = 0;
+        this.viewer2D.render();
+        this.showToast("🛰️ Coordenadas PNOA actualizadas.", "success");
+      });
+    }
+
+    if (btnRecenter) {
+      btnRecenter.addEventListener("click", () => {
+        this.viewer2D.camX = 0;
+        this.viewer2D.camY = 0;
+        this.viewer2D.render();
+        this.showToast("Visor centrado en el origen (0,0) de la ortofoto.", "info");
+      });
+    }
+  }
+
+  applyPnoaLocation(lat, lon, name = "Ubicación", zone = null, utmX = null, utmY = null) {
+    if (!Number.isFinite(lat) || !Number.isFinite(lon)) return;
+
+    this.viewer2D.setPnoaConfig({
+      enabled: true,
+      centerLat: lat,
+      centerLon: lon,
+      utmZone: zone ?? (lon < -6 ? 29 : lon < 0 ? 30 : 31),
+      anchorWorldX: 0.0,
+      anchorWorldY: 0.0
+    });
+
+    this.viewer2D.camX = 0;
+    this.viewer2D.camY = 0;
+    this.viewer2D.render();
+
+    // Sincronizar botones y checkboxes de la interfaz
+    const btnTogglePnoa = document.getElementById("btn-toggle-pnoa");
+    const chkLayerPnoa = document.getElementById("chk-layer-pnoa");
+    const chkActive = document.getElementById("modal-chk-pnoa-active");
+    if (btnTogglePnoa) {
+      btnTogglePnoa.classList.add("active");
+      btnTogglePnoa.style.borderColor = "#0284c7";
+      btnTogglePnoa.style.color = "#38bdf8";
+      btnTogglePnoa.style.background = "rgba(2, 132, 199, 0.28)";
+    }
+    if (chkLayerPnoa) chkLayerPnoa.checked = true;
+    if (chkActive) chkActive.checked = true;
+
+    // Sincronizar inputs numéricos de coordenadas
+    const inpLat = document.getElementById("inp-pnoa-lat");
+    const inpLon = document.getElementById("inp-pnoa-lon");
+    const inpUtmX = document.getElementById("inp-pnoa-utmx");
+    const inpUtmY = document.getElementById("inp-pnoa-utmy");
+    const selHuso = document.getElementById("sel-pnoa-huso");
+    if (inpLat) inpLat.value = lat.toFixed(5);
+    if (inpLon) inpLon.value = lon.toFixed(5);
+    if (inpUtmX && utmX !== null) inpUtmX.value = Math.round(utmX);
+    if (inpUtmY && utmY !== null) inpUtmY.value = Math.round(utmY);
+    if (selHuso && zone !== null) selHuso.value = String(zone);
+
+    const searchStatus = document.getElementById("pnoa-search-status");
+    if (searchStatus) {
+      searchStatus.innerHTML = `<span style="color:#22c55e;">✓ Ortofoto centrada en ${name}.</span>`;
+    }
+
+    this.showToast(`🛰️ Ortofoto PNOA posicionada en ${name}.`, "success");
+  }
+
+  _setupToponymSearch(syncPnoaButtonState) {
+    const inpViewer = document.getElementById("inp-viewer-toponym");
+    const btnClearViewer = document.getElementById("btn-clear-toponym");
+    const dropdownViewer = document.getElementById("toponym-dropdown-results");
+
+    const inpModal = document.getElementById("inp-pnoa-search");
+    const btnModalSearch = document.getElementById("btn-pnoa-search");
+    const modalSearchStatus = document.getElementById("pnoa-search-status");
+
+    let debounceTimer = null;
+    let activeIndex = -1;
+    let currentResults = [];
+
+    const formatToponymResult = (item) => {
+      const addr = item.address || {};
+      const road = addr.road || addr.street || addr.pedestrian || addr.highway || "";
+      const city = addr.city || addr.town || addr.village || addr.municipality || "";
+      const prov = addr.province || addr.state || "";
+
+      let title = item.name || road || city || item.display_name.split(",")[0].trim();
+      let subtitle = [road && road !== title ? road : null, city && city !== title ? city : null, prov]
+        .filter(Boolean)
+        .join(", ");
+
+      if (!subtitle) {
+        const parts = item.display_name.split(",");
+        parts.shift();
+        subtitle = parts.slice(0, 3).join(",").trim();
+      }
+
+      // Asegurar que nombres extranjeros como "Spain" se muestren siempre en español ("España")
+      subtitle = subtitle.replace(/\bSpain\b/gi, "España");
+
+      return {
+        lat: parseFloat(item.lat),
+        lon: parseFloat(item.lon),
+        title,
+        subtitle,
+        fullName: `${title} (${subtitle || "España"})`
+      };
+    };
+
+    const fetchOsmPlaces = async (query) => {
+      const q = query.trim();
+      if (!q || q.length < 2) return [];
+      const url = `https://nominatim.openstreetmap.org/search?q=${encodeURIComponent(q)}&countrycodes=es&format=json&addressdetails=1&limit=6`;
+      const res = await fetch(url, { headers: { "Accept-Language": "es,es-ES;q=0.9" } });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const data = await res.json();
+      return Array.isArray(data) ? data.map(formatToponymResult) : [];
+    };
+
+    const closeDropdown = () => {
+      if (dropdownViewer) {
+        dropdownViewer.style.display = "none";
+        dropdownViewer.innerHTML = "";
+      }
+      activeIndex = -1;
+      currentResults = [];
+    };
+
+    const renderDropdown = (results, query) => {
+      if (!dropdownViewer) return;
+      dropdownViewer.innerHTML = "";
+      currentResults = results;
+      activeIndex = -1;
+
+      if (!results || results.length === 0) {
+        dropdownViewer.innerHTML = `<div class="toponym-message">No se encontraron lugares en España para «${query}».</div>`;
+        dropdownViewer.style.display = "block";
+        return;
+      }
+
+      for (let i = 0; i < results.length; i++) {
+        const r = results[i];
+        const el = document.createElement("div");
+        el.className = "toponym-item";
+        el.dataset.index = String(i);
+        el.innerHTML = `
+          <div class="toponym-item-title">📍 ${r.title}</div>
+          <div class="toponym-item-subtitle">${r.subtitle}</div>
+        `;
+        el.addEventListener("click", () => {
+          if (inpViewer) inpViewer.value = r.title;
+          this.applyPnoaLocation(r.lat, r.lon, r.title);
+          closeDropdown();
+        });
+        dropdownViewer.appendChild(el);
+      }
+      dropdownViewer.style.display = "block";
+    };
+
+    if (inpViewer) {
+      inpViewer.addEventListener("input", () => {
+        const val = inpViewer.value.trim();
+        if (btnClearViewer) {
+          btnClearViewer.style.display = val ? "inline-block" : "none";
+        }
+        clearTimeout(debounceTimer);
+        if (val.length < 2) {
+          closeDropdown();
+          return;
+        }
+
+        if (dropdownViewer) {
+          dropdownViewer.innerHTML = `<div class="toponym-message">🔍 Buscando en OpenStreetMap España...</div>`;
+          dropdownViewer.style.display = "block";
+        }
+
+        debounceTimer = setTimeout(async () => {
+          try {
+            const places = await fetchOsmPlaces(val);
+            renderDropdown(places, val);
+          } catch (err) {
+            if (dropdownViewer) {
+              dropdownViewer.innerHTML = `<div class="toponym-message" style="color:#f87171;">Error al consultar OpenStreetMap. Verifique la conexión a internet.</div>`;
+            }
+          }
+        }, 300);
+      });
+
+      inpViewer.addEventListener("keydown", (e) => {
+        if (!dropdownViewer || dropdownViewer.style.display === "none") return;
+        const items = dropdownViewer.querySelectorAll(".toponym-item");
+        if (items.length === 0) return;
+
+        if (e.key === "ArrowDown") {
+          e.preventDefault();
+          activeIndex = (activeIndex + 1) % items.length;
+          items.forEach((it, idx) => it.classList.toggle("selected", idx === activeIndex));
+          items[activeIndex]?.scrollIntoView({ block: "nearest" });
+        } else if (e.key === "ArrowUp") {
+          e.preventDefault();
+          activeIndex = (activeIndex - 1 + items.length) % items.length;
+          items.forEach((it, idx) => it.classList.toggle("selected", idx === activeIndex));
+          items[activeIndex]?.scrollIntoView({ block: "nearest" });
+        } else if (e.key === "Enter") {
+          e.preventDefault();
+          const target = activeIndex >= 0 ? currentResults[activeIndex] : currentResults[0];
+          if (target) {
+            inpViewer.value = target.title;
+            this.applyPnoaLocation(target.lat, target.lon, target.title);
+            closeDropdown();
+          }
+        } else if (e.key === "Escape") {
+          closeDropdown();
+        }
+      });
+    }
+
+    if (btnClearViewer) {
+      btnClearViewer.addEventListener("click", () => {
+        if (inpViewer) {
+          inpViewer.value = "";
+          inpViewer.focus();
+        }
+        btnClearViewer.style.display = "none";
+        closeDropdown();
+      });
+    }
+
+    document.addEventListener("click", (e) => {
+      const container = document.getElementById("toponym-search-container");
+      if (container && !container.contains(e.target)) {
+        closeDropdown();
+      }
+    });
+
+    // Búsqueda en el modal de configuración PNOA
+    const executeModalSearch = async () => {
+      const q = (inpModal?.value || "").trim();
+      if (!q) return;
+      if (modalSearchStatus) {
+        modalSearchStatus.innerHTML = `<span style="color:#38bdf8;">Buscando «${q}» en España...</span>`;
+      }
+      try {
+        const places = await fetchOsmPlaces(q);
+        if (places && places.length > 0) {
+          const first = places[0];
+          this.applyPnoaLocation(first.lat, first.lon, first.fullName);
+          if (modalSearchStatus) {
+            modalSearchStatus.innerHTML = `<span style="color:#22c55e;">✓ Localizado: ${first.fullName}</span>`;
+          }
+          if (inpViewer) inpViewer.value = first.title;
+        } else {
+          if (modalSearchStatus) {
+            modalSearchStatus.innerHTML = `<span style="color:#f87171;">No se encontraron lugares en España para «${q}».</span>`;
+          }
+        }
+      } catch (err) {
+        if (modalSearchStatus) {
+          modalSearchStatus.innerHTML = `<span style="color:#f87171;">Error al consultar OpenStreetMap. Verifique la conexión a internet o introduzca coordenadas manualmente.</span>`;
+        }
+      }
+    };
+
+    if (btnModalSearch) {
+      btnModalSearch.addEventListener("click", executeModalSearch);
+    }
+    if (inpModal) {
+      inpModal.addEventListener("keydown", (e) => {
+        if (e.key === "Enter") {
+          e.preventDefault();
+          executeModalSearch();
+        }
+      });
+    }
+  }
+
+  _findFrameIndexForDist(targetDist) {
+    if (!this.simResult || !this.simResult.states || this.simResult.states.length === 0) return 0;
+    const states = this.simResult.states;
+    const n = states.length;
+    const d0 = states[0].dist ?? 0;
+    const dn = states[n - 1].dist ?? 0;
+    if (targetDist <= d0) return 0;
+    if (targetDist >= dn) return n - 1;
+
+    let low = 0;
+    let high = n - 1;
+    while (low <= high) {
+      const mid = (low + high) >> 1;
+      const dMid = states[mid].dist ?? 0;
+      if (dMid < targetDist) {
+        low = mid + 1;
+      } else {
+        high = mid - 1;
+      }
+    }
+    if (low >= n) return n - 1;
+    if (low === 0) return 0;
+    const prevD = states[low - 1].dist ?? 0;
+    const nextD = states[low].dist ?? 0;
+    return (targetDist - prevD < nextD - targetDist) ? low - 1 : low;
+  }
+
   _startAnimationLoop() {
+    if (this._animRafId !== null) return;
+    this.lastAnimTime = 0;
     const step = (timestamp) => {
+      if (!this.isPlaying) {
+        this._animRafId = null;
+        this.lastAnimTime = 0;
+        return;
+      }
       if (!this.lastAnimTime) this.lastAnimTime = timestamp;
       const dt = Math.min(0.1, (timestamp - this.lastAnimTime) / 1000);
       this.lastAnimTime = timestamp;
 
-      if (this.isPlaying && this.simResult && this.simResult.states.length > 1) {
-        // Avanzar ~28 estados por segundo a velocidad 1x
-        this.currentFrameFloat += dt * 28.0 * this.playSpeed;
-        if (this.currentFrameFloat >= this.simResult.states.length) {
-          this.currentFrameFloat = 0;
+      if (this.simResult && this.simResult.states.length > 1) {
+        const totalDist = this.simResult.summary.totalDistanceM || (this.simResult.states[this.simResult.states.length - 1].dist ?? 0);
+        if (totalDist > 0) {
+          // Velocidad nominal de avance en maniobra rigurosamente constante: 2.0 m/s (~7.2 km/h) a 1x
+          const nominalSpeedMs = 2.0;
+          this.currentAnimDistM = (this.currentAnimDistM ?? 0) + dt * nominalSpeedMs * this.playSpeed;
+          if (this.currentAnimDistM >= totalDist) {
+            this.currentAnimDistM = 0;
+          }
+          const frameIdx = this._findFrameIndexForDist(this.currentAnimDistM);
+          this.currentFrameFloat = frameIdx;
+          this._syncFrameToViewers(frameIdx);
+        } else {
+          this._syncFrameToViewers(0);
         }
-        this._syncFrameToViewers(Math.floor(this.currentFrameFloat));
       }
-      requestAnimationFrame(step);
+      this._animRafId = requestAnimationFrame(step);
     };
-    requestAnimationFrame(step);
+    this._animRafId = requestAnimationFrame(step);
   }
 }
 

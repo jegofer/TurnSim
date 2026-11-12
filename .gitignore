@@ -1,7 +1,7 @@
 # Archivo de ignorados para control de versiones (Git)
 # Proyecto: TurnSim — Simulador de Barrido de Vehículos Pesados
 
-# Entornos virtuales Python
+# Entornos virtuales y dependencias de paquetes
 .venv/
 venv/
 env/
@@ -10,13 +10,32 @@ __pycache__/
 *.py[cod]
 *$py.class
 *.so
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
 
-# Documentación interna y archivos de especificación no publicables en GitHub
+# Documentación interna, auditorías locales y archivos de prueba privados
 PROMT_ORIGINAL.md
 docs/
 docs/**
+TurnSim_Audit/
+TurnSim_CAD_Test/
+TurnSim_Engineering_Audit/
+TurnSim_UX_UI_Proposals/
+TurnSim_Industrial_Test.dxf
 
-# Salidas de compilación / distribución
+# Archivos de configuración local, claves y credenciales
+.env
+.env.*
+*.token
+*.key
+*.pem
+*.pfx
+*.secret
+rest-token
+
+# Salidas de compilación / distribución temporal
 build/
 dist/
 *.egg-info/
