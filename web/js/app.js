@@ -1133,6 +1133,7 @@ export class SweptPathApp {
     if (btnLang) {
       btnLang.addEventListener("click", () => {
         this.i18n.toggleLanguage();
+        this._updateStageTitlesUI();
         this._updateVehicleSummaryAndValidationUI();
         this._updateTopTelemetryBar();
         this._renderSegmentsListUI();
@@ -1528,16 +1529,34 @@ export class SweptPathApp {
     this._initHybridWorkflow();
   }
 
+  _getStageTitle(stageNum) {
+    const fallbackTitles = {
+      1: "1. Escenario y entorno CAD / GIS",
+      2: "2. Selección y cotas de vehículo",
+      3: "3. Trazado y tramos de maniobra",
+      4: "4. Simulación cinemática y capas",
+      5: "5. Análisis de resguardo y obstáculos",
+      6: "6. Informes técnicos y exportación"
+    };
+    const key = `stage_${stageNum}_title`;
+    return this.i18n ? this.i18n.t(key, fallbackTitles[stageNum]) : fallbackTitles[stageNum];
+  }
+
+  _updateStageTitlesUI() {
+    const titleEl = document.getElementById("drawer-active-title");
+    if (titleEl && this.currentStage) {
+      titleEl.textContent = this._getStageTitle(this.currentStage);
+    }
+    for (let i = 1; i <= 6; i++) {
+      const btn = document.getElementById(`act-btn-${i}`);
+      if (btn) {
+        btn.title = this._getStageTitle(i);
+      }
+    }
+  }
+
   _initHybridWorkflow() {
     this.currentStage = 4;
-    const stageTitles = {
-      1: "1. Escenario y Entorno CAD",
-      2: "2. Selección y Cotas de Vehículo",
-      3: "3. Trazado y Tramos de Maniobra",
-      4: "4. Simulación Cinemática y Capas",
-      5: "5. Análisis de Resguardo y Obstáculos",
-      6: "6. Informes Técnicos y Exportación"
-    };
 
     const activateStage = (stageNum) => {
       this.currentStage = stageNum;
@@ -1565,8 +1584,8 @@ export class SweptPathApp {
 
       // Actualizar título de la gaveta
       const titleEl = document.getElementById("drawer-active-title");
-      if (titleEl && stageTitles[stageNum]) {
-        titleEl.textContent = stageTitles[stageNum];
+      if (titleEl) {
+        titleEl.textContent = this._getStageTitle(stageNum);
       }
 
       // Mostrar el bloque de la etapa y ocultar los demás
@@ -2744,7 +2763,7 @@ export class SweptPathApp {
     backdrop.innerHTML = `
       <div class="modal-dialog">
         <div class="modal-header">
-          <h3 id="modal-dxf-title">📂 Importación de Plano CAD DXF: ${escapeHTML(fileName)}</h3>
+          <h3 id="modal-dxf-title">📂 Importación de plano CAD DXF: ${escapeHTML(fileName)}</h3>
           <button type="button" class="btn btn-sm btn-outline" id="btn-modal-close" aria-label="Cerrar ventana">✕</button>
         </div>
         <div class="modal-body">
@@ -2756,7 +2775,7 @@ export class SweptPathApp {
           <!-- 1. EJE DE TRAYECTORIA -->
           <div class="layer-field-row">
             <div class="layer-field-label">
-              <span>Eje / Trayectoria del camión:</span>
+              <span>Eje / trayectoria del camión:</span>
               ${trajMatchBadge}
             </div>
             <select id="modal-sel-trajectory" style="width:100%;">
@@ -2770,12 +2789,12 @@ export class SweptPathApp {
             <div>
               <label class="form-label" for="modal-sel-dir">Sentido de marcha</label>
               <select id="modal-sel-dir" style="width:100%;">
-                <option value="1" selected>Avance (Sentido de dibujo)</option>
-                <option value="-1">Marcha atrás (Retroceso)</option>
+                <option value="1" selected>Avance (sentido de dibujo)</option>
+                <option value="-1">Marcha atrás (retroceso)</option>
               </select>
             </div>
             <div>
-              <label class="form-label" for="modal-inp-agreement">Radio mínimo acuerdo (m)</label>
+              <label class="form-label" for="modal-inp-agreement">Radio mínimo de acuerdo (m)</label>
               <input type="number" id="modal-inp-agreement" value="12.5" step="0.5" min="5" max="50" style="width:100%;" />
             </div>
           </div>
@@ -2783,19 +2802,19 @@ export class SweptPathApp {
           <!-- 2. OBSTÁCULOS Y EDIFICIOS -->
           <div class="layer-field-row">
             <div class="layer-field-label">
-              <span>Obstáculos físicos / Edificaciones:</span>
+              <span>Obstáculos físicos / edificaciones:</span>
               ${obsMatchBadge}
             </div>
             <select id="modal-sel-obstacles" multiple size="3" style="width:100%;background:#0b1120;color:#f8fafc;border:1px solid #334155;border-radius:4px;padding:4px;">
               ${buildMultiOptions(suggested.obstacleLayers)}
             </select>
-            <div class="layer-desc-hint">Elementos que provocan colisión física (Mantenga Ctrl/Cmd para selección múltiple).</div>
+            <div class="layer-desc-hint">Elementos que provocan colisión física (mantenga pulsado Ctrl/Cmd para selección múltiple).</div>
           </div>
 
           <!-- 3. BORDILLOS Y DELIMITACIONES -->
           <div class="layer-field-row">
             <div class="layer-field-label">
-              <span>Bordes de calzada / Bordillos:</span>
+              <span>Bordes de calzada / bordillos:</span>
             </div>
             <select id="modal-sel-boundaries" multiple size="2" style="width:100%;background:#0b1120;color:#f8fafc;border:1px solid #334155;border-radius:4px;padding:4px;">
               ${buildMultiOptions(suggested.boundaryLayers)}
@@ -2805,7 +2824,7 @@ export class SweptPathApp {
           <!-- 4. ZONAS RESTRINGIDAS -->
           <div class="layer-field-row">
             <div class="layer-field-label">
-              <span>Zonas restringidas / Excluidas:</span>
+              <span>Zonas restringidas / excluidas:</span>
             </div>
             <select id="modal-sel-restricted" multiple size="2" style="width:100%;background:#0b1120;color:#f8fafc;border:1px solid #334155;border-radius:4px;padding:4px;">
               ${buildMultiOptions(suggested.restrictedLayers)}
@@ -2815,7 +2834,7 @@ export class SweptPathApp {
 
         <div class="modal-footer">
           <button type="button" class="btn btn-outline btn-sm" id="btn-modal-cancel">Cancelar</button>
-          <button type="button" class="btn btn-primary btn-sm" id="btn-modal-apply">✓ Aplicar Plano y Simular</button>
+          <button type="button" class="btn btn-primary btn-sm" id="btn-modal-apply">✓ Aplicar plano y simular</button>
         </div>
       </div>
     `;

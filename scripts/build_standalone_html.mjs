@@ -239,12 +239,12 @@ ${cssContent}
     <div class="app-layout">
       <!-- BARRA DE ACTIVIDAD VERTICAL (52 px) -->
       <aside class="activity-bar">
-        <button type="button" class="act-btn active" data-stage="1" id="act-btn-1" title="1. Escenario y Entorno CAD">📁</button>
-        <button type="button" class="act-btn" data-stage="2" id="act-btn-2" title="2. Vehículo de Diseño">🚛</button>
-        <button type="button" class="act-btn" data-stage="3" id="act-btn-3" title="3. Maniobra y Trazado">✏️</button>
-        <button type="button" class="act-btn" data-stage="4" id="act-btn-4" title="4. Simulación Cinemática y Capas">⏱️</button>
-        <button type="button" class="act-btn" data-stage="5" id="act-btn-5" title="5. Análisis de Resguardo y Obstáculos">⚠️</button>
-        <button type="button" class="act-btn" data-stage="6" id="act-btn-6" title="6. Informes Técnicos y Exportación">📄</button>
+        <button type="button" class="act-btn active" data-stage="1" id="act-btn-1" title="1. Escenario y entorno CAD / GIS">📁</button>
+        <button type="button" class="act-btn" data-stage="2" id="act-btn-2" title="2. Vehículo de diseño">🚛</button>
+        <button type="button" class="act-btn" data-stage="3" id="act-btn-3" title="3. Maniobra y trazado">✏️</button>
+        <button type="button" class="act-btn" data-stage="4" id="act-btn-4" title="4. Simulación cinemática y capas">⏱️</button>
+        <button type="button" class="act-btn" data-stage="5" id="act-btn-5" title="5. Análisis de resguardo y obstáculos">⚠️</button>
+        <button type="button" class="act-btn" data-stage="6" id="act-btn-6" title="6. Informes técnicos y exportación">📄</button>
         <div class="act-spacer"></div>
         <button type="button" class="act-btn" id="btn-toggle-sidebar" title="Plegar / desplegar panel lateral (Ctrl+B)">◀</button>
       </aside>
@@ -252,7 +252,7 @@ ${cssContent}
       <!-- GAVETA LATERAL RETRÁCTIL (DRAWER) -->
       <aside class="left-sidebar drawer-panel" id="left-sidebar">
         <div class="drawer-header">
-          <span class="drawer-title" id="drawer-active-title">1. Escenario y Entorno CAD</span>
+          <span class="drawer-title" id="drawer-active-title">1. Escenario y entorno CAD / GIS</span>
           <button type="button" id="btn-close-drawer" class="drawer-close-btn" title="Plegar panel (Ctrl+B)">✕</button>
         </div>
 

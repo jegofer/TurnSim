@@ -46,6 +46,12 @@ export const LOCALES = {
 
     // Sección C
     section_c_title: "C. Configuración de la maniobra",
+    stage_1_title: "1. Escenario y entorno CAD / GIS",
+    stage_2_title: "2. Selección y cotas de vehículo",
+    stage_3_title: "3. Trazado y tramos de maniobra",
+    stage_4_title: "4. Simulación cinemática y capas",
+    stage_5_title: "5. Análisis de resguardo y obstáculos",
+    stage_6_title: "6. Informes técnicos y exportación",
     dxf_drop_title: "📂 Cargar plano CAD o GIS (.DXF, .GeoJSON)",
     dxf_drop_hint: "Arrastre su archivo DXF o GeoJSON con cartografía, o haga clic para examinar",
     lbl_scenario: "Escenario viario preconfigurado",
@@ -59,7 +65,7 @@ export const LOCALES = {
     btn_draw_waypoints_active: "✏️ Trazar en plano [Activo]",
     btn_add_straight: "+ Añadir recta",
     btn_add_arc: "+ Añadir curva",
-    lbl_waypoints_collapsible: "Generar por puntos de paso (Waypoints X, Y)",
+    lbl_waypoints_collapsible: "Generar por puntos de paso (waypoints X, Y)",
     lbl_waypoints_text: "Lista de coordenadas X, Y (una por línea)",
     lbl_waypoints_radius: "Radio acuerdo (m)",
     lbl_waypoints_dir: "Sentido",
@@ -199,6 +205,12 @@ export const LOCALES = {
 
     // Section C
     section_c_title: "C. Maneuver & Path Setup",
+    stage_1_title: "1. CAD / GIS Scenario & Environment",
+    stage_2_title: "2. Vehicle Selection & Dimensions",
+    stage_3_title: "3. Path & Maneuver Segments",
+    stage_4_title: "4. Kinematic Simulation & Layers",
+    stage_5_title: "5. Clearance Analysis & Obstacles",
+    stage_6_title: "6. Technical Reports & Export",
     dxf_drop_title: "📂 Load CAD or GIS drawing (.DXF, .GeoJSON)",
     dxf_drop_hint: "Drop your DXF or GeoJSON drawing file or click to browse",
     lbl_scenario: "Preconfigured Road Scenario",

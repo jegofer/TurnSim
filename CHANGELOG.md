@@ -3,6 +3,19 @@
 ## 2026-11-12
 
 ### Añadido
+- **Traducción Integral al Español Técnico de la Herramienta de Carga CAD / GIS y Títulos de Etapa:**
+  - Traducción y normalización ortotipográfica del modal de asignación y correspondencia de capas CAD DXF (`_showDxfLayerMappingModal` en `web/js/app.js`):
+    - Cabecera: «📂 Importación de plano CAD DXF: [nombre de archivo]».
+    - Asignación de capas técnicas: «Eje / trayectoria del camión», «Avance (sentido de dibujo)», «Marcha atrás (retroceso)», «Radio mínimo de acuerdo (m)», «Obstáculos físicos / edificaciones», «Bordes de calzada / bordillos», «Zonas restringidas / excluidas».
+    - Ayudas operativas: indicación clara de selección múltiple mediante pulsación de Ctrl/Cmd y botones normalizados «Cancelar» y «✓ Aplicar plano y simular».
+  - Normalización de las etapas del flujo de trabajo híbrido en español e inglés:
+    - Etapa 1: «1. Escenario y entorno CAD / GIS»
+    - Etapa 2: «2. Selección y cotas de vehículo»
+    - Etapa 3: «3. Trazado y tramos de maniobra»
+    - Etapa 4: «4. Simulación cinemática y capas»
+    - Etapa 5: «5. Análisis de resguardo y obstáculos»
+    - Etapa 6: «6. Informes técnicos y exportación»
+  - Inclusión de claves bilingües `stage_1_title` a `stage_6_title` en `web/js/i18n/locales.js` (`LOCALES.es` y `LOCALES.en`), con actualización reactiva automática del título de la gaveta lateral (`drawer-active-title`) y los títulos emergentes de la barra de actividades (`act-btn-X`) ante el conmutador de idioma.
 - **Autoencuadre Dinámico en Visor 3D al Pulsar Modo de Vista (DEC-022):**
   - Al pulsar el botón `Visor 3D` (o `Dividida 2D+3D`), la cámara tridimensional se redimensiona y ejecuta automáticamente un encuadre integral (`fitToScene()`).
   - Cálculo ampliado de la caja envolvente que contempla no solo los estados de trayectoria, sino los contornos poligonales completos del tractor y semirremolque, la envolvente física de barrido, los obstáculos 3D extruidos, los fondos CAD y los waypoints.

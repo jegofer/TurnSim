@@ -42,3 +42,5 @@
 | Trazado mediante Spline CAD continua (Catmull-Rom) | COMPLETADA | Trazado continuo suave para glorietas y accesos con test TEST-43 (DEC-020) |
 | Interpolación PCHIP anti-overshoot y ajuste en origen | COMPLETADA | Monotonicidad estricta sin sag, alineación en eje director y tramos directos spline (DEC-021) |
 | Velocidad de animación constante en calzada | COMPLETADA | Avance temporal por distancia métrica acumulada en lugar de estados por segundo (DEC-021) |
+| Autoencuadre dinámico al activar Visor 3D | COMPLETADA | Reencuadre y cálculo de envolvente 3D integral al cambiar de vista (DEC-022) |
+| Traducción al español de importador CAD/GIS y etapas | COMPLETADA | Modal de correspondencia de capas DXF, drop-zone, títulos de etapa y paridad bilingüe en i18n |
