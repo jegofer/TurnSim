@@ -2010,13 +2010,36 @@ let simTrackingForRateTest = null;
   const autoChains = splitWaypointsByDirection(cuspAutoWps, 1, { autoDetectCusps: true });
   const autoDetected = autoChains.length === 2 && autoChains[0].direction === 1 && autoChains[1].direction === -1;
 
-  // 3. Envolvente combinada completa sin errores
+  // 3. Verificar que en marcha atrás el semirremolque avanza SIEMPRE por delante de la cabeza tractora
+  //    (producto escalar del vector tractor->trailer con el vector de desplazamiento marcha atrás > 0)
+  let trailerAlwaysLeadsInReverse = true;
+  let reverseStepCount = 0;
+  for (let i = 1; i < simFront.states.length; i++) {
+    const prev = simFront.states[i - 1];
+    const curr = simFront.states[i];
+    if (curr.direction === -1 && prev.direction === -1) {
+      const mvX = curr.tx - prev.tx;
+      const mvY = curr.ty - prev.ty;
+      const mvLen = Math.hypot(mvX, mvY);
+      if (mvLen > 1e-4) {
+        reverseStepCount++;
+        const vecTractorToTrailerX = curr.tx - curr.x;
+        const vecTractorToTrailerY = curr.ty - curr.y;
+        const dotLead = vecTractorToTrailerX * mvX + vecTractorToTrailerY * mvY;
+        if (dotLead <= 0) {
+          trailerAlwaysLeadsInReverse = false;
+        }
+      }
+    }
+  }
+
+  // 4. Envolvente combinada completa sin errores
   const fullMixed = buildCompleteSimulationResult(veh, builtFront, { safetyMarginM: 0.30 });
   const envOk = fullMixed.envelope.length > 50 && fullMixed.summary.maxSweptWidthM > 2.5;
 
   assertCondition(
     "TEST-46",
-    `Maniobras combinadas avance/marcha atrás en vértices, continuidad G1 y detección automática de cúspides`,
+    `Maniobras combinadas avance/marcha atrás en vértices, remolque por delante en retroceso y detección de cúspides`,
     twoDirsSpline &&
       builtFillet.segments.some((s) => s.direction === 1) &&
       builtFillet.segments.some((s) => s.direction === -1) &&
@@ -2024,10 +2047,12 @@ let simTrackingForRateTest = null;
       maxJumpPos < 0.6 &&
       maxJumpHeading < 0.25 &&
       signedDistReversed &&
+      trailerAlwaysLeadsInReverse &&
+      reverseStepCount > 30 &&
       autoDetected &&
       envOk &&
       simRear.states.length > 50,
-    `segs=${builtFront.segments.length}, maxJump=${maxJumpPos.toFixed(3)} m, maxDH=${(maxJumpHeading * 180 / Math.PI).toFixed(2)}°, maxSD=${maxSignedDist.toFixed(1)}->${finalSignedDist.toFixed(1)} m, autoCusp=${autoDetected}, maxW=${fullMixed.summary.maxSweptWidthM} m`
+    `segs=${builtFront.segments.length}, trailerLeadsRev=${trailerAlwaysLeadsInReverse} (${reverseStepCount} pasos), maxJump=${maxJumpPos.toFixed(3)} m, maxDH=${(maxJumpHeading * 180 / Math.PI).toFixed(2)}°, autoCusp=${autoDetected}, maxW=${fullMixed.summary.maxSweptWidthM} m`
   );
 }
 

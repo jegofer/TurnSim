@@ -3654,8 +3654,8 @@ export class SweptPathApp {
       if (this.simResult && this.simResult.states.length > 1) {
         const totalDist = this.simResult.summary.totalDistanceM || (this.simResult.states[this.simResult.states.length - 1].dist ?? 0);
         if (totalDist > 0) {
-          // Velocidad nominal de avance en maniobra rigurosamente constante: 2.0 m/s (~7.2 km/h) a 1x
-          const nominalSpeedMs = 2.0;
+          // Velocidad nominal de avance en maniobra rigurosamente constante: 3.5 m/s (~12.6 km/h) a 1x
+          const nominalSpeedMs = 3.5;
           this.currentAnimDistM = (this.currentAnimDistM ?? 0) + dt * nominalSpeedMs * this.playSpeed;
           if (this.currentAnimDistM >= totalDist) {
             this.currentAnimDistM = 0;

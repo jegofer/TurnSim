@@ -692,7 +692,15 @@ export function buildSegmentsFromSplineWaypoints(waypoints, direction = 1, optio
 
       let startX = p0.x;
       let startY = p0.y;
-      if (steeringRef === "front_axle") {
+      if (dir < 0) {
+        const trDef = options.vehicle?.trailer;
+        if (trDef && trDef.wheelbase > 0) {
+          const L_eff = computeEffectiveTrailerWheelbase(trDef);
+          const h = options.vehicle?.tractor?.hitchOffset || 0;
+          startX = p0.x + (L_eff - h) * Math.cos(startHeadingRad);
+          startY = p0.y + (L_eff - h) * Math.sin(startHeadingRad);
+        }
+      } else if (steeringRef === "front_axle") {
         startX = p0.x - Lwb * Math.cos(startHeadingRad);
         startY = p0.y - Lwb * Math.sin(startHeadingRad);
       }
@@ -1232,12 +1240,62 @@ export function simulateManeuver(vehicle, maneuver, options = {}) {
         );
       }
     } else if (seg.type === "spline") {
-      const splineSamples = seg.samples || sampleCatmullRomSpline(seg.waypoints, { stepM: straightStep });
+      let splineSamples = seg.samples || sampleCatmullRomSpline(seg.waypoints, { stepM: straightStep });
       if (splineSamples && splineSamples.length >= 2) {
         const segRefPoint = seg.steeringReferencePoint || steeringReferencePoint;
         const Lwb = tv.wheelbase;
         const maxSteerDeg = tv.maxSteerAngleDeg || 38.0;
         const maxSteerRad = (maxSteerDeg * Math.PI) / 180;
+        const maxArticDeg = (vehicle.limits && vehicle.limits.maxArticulationAngleDeg) || 85.0;
+        const maxSafeArticRad = ((maxArticDeg * 0.82) * Math.PI) / 180;
+
+        // Si es un sub-tramo posterior (states.length > 1), enlazar suavemente desde la pose física real actual
+        if (states.length > 1 && seg.waypoints && seg.waypoints.length >= 2) {
+          const sFirst = splineSamples[0];
+          const sSecond = splineSamples[1];
+          const segInitMotionHeading = Math.atan2(sSecond.y - sFirst.y, sSecond.x - sFirst.x);
+
+          if (dir < 0 && trailersData.length > 0) {
+            const td0 = trailersData[0];
+            const trailerRearMotionHeading = normalizeAngle(td0.heading + Math.PI);
+            const diffTurn = Math.abs(normalizeAngle(segInitMotionHeading - trailerRearMotionHeading));
+            if (diffTurn <= (105 * Math.PI) / 180) {
+              // Cúspide real hacia atrás: partir desde la posición actual del eje del semirremolque
+              const tailWps = seg.waypoints.slice(1);
+              const adaptedWps = [{ x: td0.x, y: td0.y }, ...tailWps];
+              splineSamples = sampleCatmullRomSpline(adaptedWps, {
+                stepM: straightStep,
+                initialTangentRad: trailerRearMotionHeading
+              });
+            } else {
+              // Continuación hacia delante marcada como marcha atrás: orientar el conjunto en posición de retroceso
+              const revHeading = normalizeAngle(segInitMotionHeading + Math.PI);
+              td0.x = sFirst.x;
+              td0.y = sFirst.y;
+              td0.heading = revHeading;
+              heading = revHeading;
+              hx = td0.x + td0.effectiveWheelbase * Math.cos(revHeading);
+              hy = td0.y + td0.effectiveWheelbase * Math.sin(revHeading);
+              x = hx - effectiveHitch * Math.cos(revHeading);
+              y = hy - effectiveHitch * Math.sin(revHeading);
+              td0.hx = hx;
+              td0.hy = hy;
+            }
+          } else if (dir > 0) {
+            const refX = segRefPoint === "front_axle" ? x + Lwb * Math.cos(heading) : x;
+            const refY = segRefPoint === "front_axle" ? y + Lwb * Math.sin(heading) : y;
+            const jumpDist = Math.hypot(sFirst.x - refX, sFirst.y - refY);
+            const diffFwd = Math.abs(normalizeAngle(segInitMotionHeading - heading));
+            if (jumpDist > 0.35 && diffFwd <= (105 * Math.PI) / 180) {
+              const tailWps = seg.waypoints.slice(1);
+              const adaptedWps = [{ x: refX, y: refY }, ...tailWps];
+              splineSamples = sampleCatmullRomSpline(adaptedWps, {
+                stepM: straightStep,
+                initialTangentRad: heading
+              });
+            }
+          }
+        }
 
         for (let i = 0; i < splineSamples.length - 1; i++) {
           const s0 = splineSamples[i];
@@ -1258,9 +1316,76 @@ export function simulateManeuver(vehicle, maneuver, options = {}) {
           let curvature = s1.curvature || 0;
           let steerAngleRad = 0;
 
-          if (segRefPoint === "front_axle") {
-            // El eje director delantero recorre con exactitud milimétrica la spline trazada
-            // tanto en avance (dir = +1) como en marcha atrás (dir = -1)
+          if (dir < 0 && trailersData.length > 0) {
+            // CINEMÁTICA INVERSA DE CAMIÓN ARTICULADO EN MARCHA ATRÁS:
+            // El semirremolque avanza el primero en el sentido del retroceso (s0 -> s1) con su trasera por delante,
+            // mientras la cabeza tractora va detrás empujándolo por la quinta rueda y contravolanteando en curvas.
+            const td0 = trailersData[0];
+            const Lt = td0.effectiveWheelbase;
+            const prevTractorHeading = heading;
+
+            td0.x = s1.x;
+            td0.y = s1.y;
+            const targetTrHeading = normalizeAngle(s1.headingRad + Math.PI);
+            const errTrHeading = normalizeAngle(targetTrHeading - td0.heading);
+            const maxTrStepRad = Math.max(0.012, (stepAbs / Math.max(2.0, Lt)) * 1.45);
+            const dTrHeading = Math.max(-maxTrStepRad, Math.min(maxTrStepRad, errTrHeading));
+            td0.heading = normalizeAngle(td0.heading + dTrHeading);
+
+            hx = td0.x + Lt * Math.cos(td0.heading);
+            hy = td0.y + Lt * Math.sin(td0.heading);
+            td0.hx = hx;
+            td0.hy = hy;
+
+            // Ángulo de articulación requerido para empujar al semirremolque con curvatura s1.curvature
+            const effCurvature = dTrHeading / (-stepAbs);
+            const rawTargetGamma = -Math.atan(Lt * (0.5 * curvature + 0.5 * effCurvature));
+            const targetGamma = Math.max(-maxSafeArticRad, Math.min(maxSafeArticRad, rawTargetGamma));
+            const currentGamma = normalizeAngle(heading - td0.heading);
+            const alpha = Math.min(1.0, stepAbs / Math.max(1.5, Lwb));
+            const newGamma = currentGamma + (targetGamma - currentGamma) * alpha;
+
+            const maxTractorStepRad = (stepAbs / Math.max(1.5, Lwb)) * Math.tan(maxSteerRad);
+            const desiredTractorHeading = normalizeAngle(td0.heading + newGamma);
+            const errTractorH = normalizeAngle(desiredTractorHeading - prevTractorHeading);
+            const dTractorH = Math.max(-maxTractorStepRad, Math.min(maxTractorStepRad, errTractorH));
+
+            heading = normalizeAngle(prevTractorHeading + dTractorH);
+            x = hx - effectiveHitch * Math.cos(heading);
+            y = hy - effectiveHitch * Math.sin(heading);
+
+            const dTractorHeading = normalizeAngle(heading - prevTractorHeading);
+            const rawSteer = Math.atan(Lwb * (dTractorHeading / (-stepAbs)));
+            steerAngleRad = Math.max(-maxSteerRad, Math.min(maxSteerRad, rawSteer));
+            curvature = steerAngleRad / Lwb;
+
+            if (trailersData.length > 1) {
+              const hOffset0 = td0.def.hitchOffset !== undefined ? td0.def.hitchOffset : (td0.def.rearOverhang || 0);
+              td0.curHitchX = td0.x + hOffset0 * Math.cos(td0.heading);
+              td0.curHitchY = td0.y + hOffset0 * Math.sin(td0.heading);
+              for (let j = 1; j < trailersData.length; j++) {
+                const td = trailersData[j];
+                const prevHx = trailersData[j - 1].prevHitchX;
+                const prevHy = trailersData[j - 1].prevHitchY;
+                const curHx = trailersData[j - 1].curHitchX;
+                const curHy = trailersData[j - 1].curHitchY;
+                td.hx = curHx;
+                td.hy = curHy;
+                [td.x, td.y, td.heading] = updateTrailerRK4(prevHx, prevHy, curHx, curHy, td.heading, td.effectiveWheelbase);
+              }
+            }
+          } else if (dir < 0) {
+            // Vehículo rígido en marcha atrás: la trasera avanza primera en sentido s0 -> s1 y el morro va detrás
+            const prevHeading = heading;
+            x = s1.x;
+            y = s1.y;
+            heading = normalizeAngle(s1.headingRad + Math.PI);
+            const dH = normalizeAngle(heading - prevHeading);
+            const rawSteer = Math.atan(Lwb * (dH / (-stepAbs)));
+            steerAngleRad = Math.max(-maxSteerRad, Math.min(maxSteerRad, rawSteer));
+            [hx, hy] = computeHitchPoint(x, y, heading, effectiveHitch);
+          } else if (segRefPoint === "front_axle") {
+            // El eje director delantero recorre con exactitud milimétrica la spline trazada en avance (dir = +1)
             const targetFx = s1.x;
             const targetFy = s1.y;
             const currentFx = x + Lwb * Math.cos(heading);
@@ -1269,27 +1394,27 @@ export function simulateManeuver(vehicle, maneuver, options = {}) {
             const dfy = targetFy - currentFy;
             const psi = Math.atan2(dfy, dfx);
 
-            const motionTargetHeading = dir >= 0 ? psi : normalizeAngle(psi + Math.PI);
-            steerAngleRad = normalizeAngle(motionTargetHeading - heading);
-            const dHeading = (ds / Lwb) * Math.sin(steerAngleRad);
+            steerAngleRad = normalizeAngle(psi - heading);
+            const dHeading = (stepAbs / Lwb) * Math.sin(steerAngleRad);
 
             heading = normalizeAngle(heading + dHeading);
             x = targetFx - Lwb * Math.cos(heading);
             y = targetFy - Lwb * Math.sin(heading);
             curvature = steerAngleRad / Lwb;
+            [hx, hy] = computeHitchPoint(x, y, heading, effectiveHitch);
+            advanceTrailers(false, 0, 0, 0, dir, hx0, hy0);
           } else {
-            // El eje motriz trasero recorre con exactitud milimétrica la spline trazada
+            // El eje motriz trasero recorre con exactitud milimétrica la spline trazada en avance (dir = +1)
             x = s1.x;
             y = s1.y;
-            heading = dir >= 0 ? s1.headingRad : normalizeAngle(s1.headingRad + Math.PI);
+            heading = s1.headingRad;
             steerAngleRad = Math.atan(Lwb * curvature);
+            [hx, hy] = computeHitchPoint(x, y, heading, effectiveHitch);
+            advanceTrailers(false, 0, 0, 0, dir, hx0, hy0);
           }
 
           dist += stepAbs;
           signedDist += ds;
-
-          [hx, hy] = computeHitchPoint(x, y, heading, effectiveHitch);
-          advanceTrailers(false, 0, 0, 0, dir, hx0, hy0);
 
           stepIndex++;
           states.push(
