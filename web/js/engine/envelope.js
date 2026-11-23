@@ -456,7 +456,7 @@ export function computeSweptEnvelope(states, vehicle, margin = 0.0, options = {}
     // 3. Ejecutar la unión booleana exacta (jerárquica por bloques Divide & Conquer para evitar coste O((K*V)^2) en Vatti)
     const CHUNK_SIZE = 36;
     const clipper = new ClipperLib.Clipper();
-    clipper.StrictlySimple = true;
+    clipper.StrictlySimple = !options.previewMode;
 
     if (subjectPaths.length <= CHUNK_SIZE) {
       for (let i = 0; i < subjectPaths.length; i++) {
@@ -816,15 +816,16 @@ export function buildCompleteSimulationResult(vehicle, maneuver, options = {}) {
     ? { maxDeltaThetaRad: (3.0 * Math.PI) / 180, maxDeltaDistM: 1.2, maxIndexGap: 40 }
     : undefined;
 
-  const envMain = computeSweptEnvelope(states, vehicle, 0.0, { samplingOptions });
+  const envMain = computeSweptEnvelope(states, vehicle, 0.0, { samplingOptions, previewMode: isPreview });
   const envMargin = safetyMargin > 0
     ? computeSweptEnvelope(states, vehicle, safetyMargin, {
         precomputedBaseExPolygons: envMain.baseExPolygons,
-        samplingOptions
+        samplingOptions,
+        previewMode: isPreview
       })
     : null;
 
-  const dimensions = computeKeyDimensions(states, envMain.obbs, envMain.maxSweptWidthSection);
+  const dimensions = isPreview ? [] : computeKeyDimensions(states, envMain.obbs, envMain.maxSweptWidthSection);
 
   // Trazas de puntos de referencia y ruedas
   const traces = {

@@ -79,7 +79,10 @@ export class EngineWorkerClient {
       try {
         const { vehicle, maneuver, options, obstacles, safetyMarginM } = payload;
         const simResult = buildCompleteSimulationResult(vehicle, maneuver, options);
-        const interferenceReport = evaluateObstacleInterferences(simResult, obstacles, safetyMarginM);
+        const interferenceReport = evaluateObstacleInterferences(simResult, obstacles, {
+          safetyMargin: safetyMarginM,
+          enableCCD: !options?.previewMode
+        });
         callback(null, { simResult, interferenceReport });
       } catch (err) {
         callback(err);

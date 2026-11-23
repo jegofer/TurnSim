@@ -47,7 +47,10 @@ self.onmessage = function(e) {
   if (action === "RECOMPUTE_ALL") {
     try {
       var simResult = buildCompleteSimulationResult(payload.vehicle, payload.maneuver, payload.options);
-      var interferenceReport = evaluateObstacleInterferences(simResult, payload.obstacles, payload.safetyMarginM);
+      var interferenceReport = evaluateObstacleInterferences(simResult, payload.obstacles, {
+        safetyMargin: payload.safetyMarginM,
+        enableCCD: !(payload.options && payload.options.previewMode)
+      });
       self.postMessage({ id: id, success: true, simResult: simResult, interferenceReport: interferenceReport });
     } catch (err) {
       self.postMessage({ id: id, success: false, error: err ? err.message : "Error" });

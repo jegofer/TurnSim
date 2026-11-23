@@ -497,6 +497,11 @@ export function evaluateObstacleInterferences(statesOrSimResult, obstacles, opti
     }
 
     const obsAABB = computePolygonAABB(verts);
+    const obsCx = obsAABB ? 0.5 * (obsAABB.minX + obsAABB.maxX) : 0;
+    const obsCy = obsAABB ? 0.5 * (obsAABB.minY + obsAABB.maxY) : 0;
+    const obsRadius = obsAABB
+      ? 0.5 * Math.hypot(obsAABB.maxX - obsAABB.minX, obsAABB.maxY - obsAABB.minY)
+      : Infinity;
 
     const evalPolyToObs = (poly) => {
       if (obs.shape === "circle") {
@@ -519,10 +524,8 @@ export function evaluateObstacleInterferences(statesOrSimResult, obstacles, opti
     let bestPart = "tractor";
     let intersected = false;
 
-    for (let i = 0; i < nStates; i++) {
+    const evalStateAt = (i) => {
       const s = states[i];
-
-      // 1. Evaluar cabeza tractora
       const tAabb = tractorAABBs[i];
       if (!obsAABB || !tAabb || aabbMinDistanceSq(tAabb, obsAABB) <= minDistanceSq) {
         const resTractor = evalPolyToObs(s.tractorPolygon);
@@ -539,11 +542,12 @@ export function evaluateObstacleInterferences(statesOrSimResult, obstacles, opti
         }
       }
 
-      // 2. Evaluar semirremolques o remolques (N cuerpos)
       if (s.trailers && s.trailers.length > 0) {
         for (let j = 0; j < s.trailers.length; j++) {
           const trState = s.trailers[j];
           if (!trState.polygon) continue;
+          const trAabb = j === 0 ? trailerAABBs[i] : computePolygonAABB(trState.polygon);
+          if (obsAABB && trAabb && aabbMinDistanceSq(trAabb, obsAABB) > minDistanceSq) continue;
           const resTr = evalPolyToObs(trState.polygon);
           if (resTr.distance < minDistance) {
             minDistance = resTr.distance;
@@ -575,8 +579,7 @@ export function evaluateObstacleInterferences(statesOrSimResult, obstacles, opti
         }
       }
 
-      // 3. Detección continua de colisiones (CCD) entre pasos i e i+1
-      if (enableCCD && i < nStates - 1) {
+      if (enableCCD && i < nStates - 1 && !(intersected && minDistance === 0)) {
         const sNext = states[i + 1];
         const capAabbT = tractorCapAABBs[i];
         if (capAabbT && (!obsAABB || aabbMinDistanceSq(capAabbT, obsAABB) <= minDistanceSq)) {
@@ -604,7 +607,25 @@ export function evaluateObstacleInterferences(statesOrSimResult, obstacles, opti
             const trA = s.trailers[j];
             const trB = sNext.trailers[j];
             if (!trA || !trB || !trA.polygon || !trB.polygon) continue;
-            const capPoly = convexHull8([...trA.polygon, ...trB.polygon]);
+            let capAabbTr = j === 0 ? trailerCapAABBs[i] : null;
+            if (!capAabbTr) {
+              const aA = computePolygonAABB(trA.polygon);
+              const aB = computePolygonAABB(trB.polygon);
+              if (aA && aB) {
+                capAabbTr = {
+                  minX: aA.minX < aB.minX ? aA.minX : aB.minX,
+                  minY: aA.minY < aB.minY ? aA.minY : aB.minY,
+                  maxX: aA.maxX > aB.maxX ? aA.maxX : aB.maxX,
+                  maxY: aA.maxY > aB.maxY ? aA.maxY : aB.maxY
+                };
+              }
+            }
+            if (obsAABB && capAabbTr && aabbMinDistanceSq(capAabbTr, obsAABB) > minDistanceSq) continue;
+            let capPoly = j === 0 ? trailerCapPolys[i] : null;
+            if (!capPoly) {
+              capPoly = convexHull8([...trA.polygon, ...trB.polygon]);
+              if (j === 0) trailerCapPolys[i] = capPoly;
+            }
             const resCap = evalPolyToObs(capPoly);
             if (resCap.distance < minDistance) {
               minDistance = resCap.distance;
@@ -641,10 +662,51 @@ export function evaluateObstacleInterferences(statesOrSimResult, obstacles, opti
           }
         }
       }
+    };
 
+    // Semilla inicial: localizar en O(N) aritmético el estado cuya AABB está más cerca del obstáculo
+    // y el estado más cercano al centro, para acotar minDistanceSq de inmediato
+    if (obsAABB && nStates > 0) {
+      let seedIdx = 0;
+      let seedDistSq = Infinity;
+      let centerSeedIdx = 0;
+      let centerDistSq = Infinity;
+      for (let i = 0; i < nStates; i++) {
+        const tAabb = tractorAABBs[i];
+        if (tAabb) {
+          const dT = aabbMinDistanceSq(tAabb, obsAABB);
+          if (dT < seedDistSq) {
+            seedDistSq = dT;
+            seedIdx = i;
+          }
+          const dxC = 0.5 * (tAabb.minX + tAabb.maxX) - obsCx;
+          const dyC = 0.5 * (tAabb.minY + tAabb.maxY) - obsCy;
+          const dC = dxC * dxC + dyC * dyC;
+          if (dC < centerDistSq) {
+            centerDistSq = dC;
+            centerSeedIdx = i;
+          }
+        }
+        const trAabb = trailerAABBs[i];
+        if (trAabb) {
+          const dTr = aabbMinDistanceSq(trAabb, obsAABB);
+          if (dTr < seedDistSq) {
+            seedDistSq = dTr;
+            seedIdx = i;
+          }
+        }
+      }
+      evalStateAt(seedIdx);
+      if (centerSeedIdx !== seedIdx && !(intersected && minDistance === 0)) evalStateAt(centerSeedIdx);
+      if (seedIdx > 0 && !(intersected && minDistance === 0)) evalStateAt(seedIdx - 1);
+      if (seedIdx + 1 < nStates && !(intersected && minDistance === 0)) evalStateAt(seedIdx + 1);
+    }
+
+    for (let i = 0; i < nStates; i++) {
       if (intersected && minDistance === 0) {
         break;
       }
+      evalStateAt(i);
     }
 
     let status = "CLEAR";

@@ -1885,6 +1885,10 @@ export class SweptPathApp {
         if (!this.viewer3D.available && typeof this.viewer3D.initIfAvailable === "function") {
           this.viewer3D.initIfAvailable();
         }
+        if (this._pending3DData && this.viewer3D.available) {
+          this.viewer3D.setData(this._pending3DData);
+          this._pending3DData = null;
+        }
         if (this.viewer3D.available) {
           this.viewer3D.fitToScene();
         }
@@ -2607,24 +2611,32 @@ export class SweptPathApp {
           cadBackgroundEntities: this.cadBackgroundEntities
         });
 
-        this.viewer3D.setData({
+        const data3D = {
           vehicle: this.vehicle,
           simResult: this.simResult,
           obstacles: this.obstacles,
           interferenceReport: this.interferenceReport,
           cadBackgroundEntities: this.cadBackgroundEntities,
           waypoints: this.viewer2D?.waypoints
-        });
+        };
+        if (this.viewMode === "2d") {
+          this._pending3DData = data3D;
+        } else {
+          this._pending3DData = null;
+          this.viewer3D.setData(data3D);
+        }
 
         if (fitCamera) {
           this.viewer2D.fitToScene();
-          this.viewer3D.fitToScene();
+          if (this.viewMode !== "2d") this.viewer3D.fitToScene();
         }
 
         this._syncFrameToViewers(Math.floor(this.currentFrameFloat));
         this._updateTopTelemetryBar();
-        this._renderObstaclesListUI();
-        this._renderPKCurves();
+        if (!previewMode) {
+          this._renderObstaclesListUI();
+          this._renderPKCurves();
+        }
       }
     );
   }
