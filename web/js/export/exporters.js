@@ -16,6 +16,49 @@ function escapeHTML(str) {
 }
 
 /**
+ * Calcula la caja envolvente (bounding box) estricta de la trayectoria de barrido
+ * (envolvente, contornos, poligonales de vehículos y trazas) con un margen en metros.
+ */
+function computeTrajectoryBbox(simResult, paddingM = 2.0) {
+  let minX = +Infinity;
+  let minY = +Infinity;
+  let maxX = -Infinity;
+  let maxY = -Infinity;
+
+  const includePt = (x, y) => {
+    if (!Number.isFinite(x) || !Number.isFinite(y)) return;
+    if (x < minX) minX = x;
+    if (y < minY) minY = y;
+    if (x > maxX) maxX = x;
+    if (y > maxY) maxY = y;
+  };
+
+  for (const pt of simResult?.envelope || []) includePt(pt[0], pt[1]);
+  for (const pt of simResult?.leftBoundary || []) includePt(pt[0], pt[1]);
+  for (const pt of simResult?.rightBoundary || []) includePt(pt[0], pt[1]);
+  for (const s of simResult?.states || []) {
+    for (const pt of s.tractorPolygon || []) includePt(pt[0], pt[1]);
+    for (const pt of s.trailerPolygon || []) includePt(pt[0], pt[1]);
+  }
+  if (simResult?.traces) {
+    for (const key of ["tractor_front", "tractor_rear", "hitch", "trailer_rear"]) {
+      for (const pt of simResult.traces[key] || []) includePt(pt[0], pt[1]);
+    }
+  }
+
+  if (!Number.isFinite(minX)) {
+    return { minX: -10, minY: -10, maxX: 35, maxY: 35 };
+  }
+
+  return {
+    minX: minX - paddingM,
+    minY: minY - paddingM,
+    maxX: maxX + paddingM,
+    maxY: maxY + paddingM
+  };
+}
+
+/**
  * Construye un diagrama vectorial SVG en planta a escala métrica exacta para insertar en el informe técnico PDF
  * o descargar como archivo vectorial independiente.
  */
@@ -24,16 +67,21 @@ export function generateSVGDiagram(
   interferenceReport,
   obstacles = [],
   layerVisibility = {},
-  cadBackgroundEntities = []
+  cadBackgroundEntities = [],
+  options = {}
 ) {
+  const focusOnTrajectory = Boolean(options?.focusOnTrajectory);
+  const overviewMode = Boolean(options?.overviewMode);
+  const highlightBbox = options?.highlightBbox || null;
+
   const showCadBackground = layerVisibility.cadBackground !== false;
   const showEnvelope = layerVisibility.envelope !== false;
   const showMargin = layerVisibility.margin !== false;
-  const showWheelTraces = layerVisibility.wheelTraces !== false;
+  const showWheelTraces = !overviewMode && layerVisibility.wheelTraces !== false;
   const showRefTraces = layerVisibility.refTraces !== false;
-  const showGhosts = layerVisibility.ghosts !== false;
+  const showGhosts = !overviewMode && layerVisibility.ghosts !== false;
   const showObstacles = layerVisibility.obstacles !== false;
-  const showDimensions = layerVisibility.dimensions !== false;
+  const showDimensions = !overviewMode && layerVisibility.dimensions !== false;
 
   // Calcular caja envolvente global (bounding box)
   let minX = +Infinity;
@@ -56,13 +104,15 @@ export function generateSVGDiagram(
     for (const pt of s.tractorPolygon || []) includePt(pt[0], pt[1]);
     for (const pt of s.trailerPolygon || []) includePt(pt[0], pt[1]);
   }
-  for (const obs of obstacles || []) {
-    if (obs.enabled === false) continue;
-    for (const pt of getObstacleVertices(obs)) includePt(pt[0], pt[1]);
-  }
-  if (showCadBackground && cadBackgroundEntities) {
-    for (const ent of cadBackgroundEntities) {
-      for (const pt of ent.vertices || []) includePt(pt[0], pt[1]);
+  if (!focusOnTrajectory) {
+    for (const obs of obstacles || []) {
+      if (obs.enabled === false) continue;
+      for (const pt of getObstacleVertices(obs)) includePt(pt[0], pt[1]);
+    }
+    if (showCadBackground && cadBackgroundEntities) {
+      for (const ent of cadBackgroundEntities) {
+        for (const pt of ent.vertices || []) includePt(pt[0], pt[1]);
+      }
     }
   }
 
@@ -73,14 +123,17 @@ export function generateSVGDiagram(
     maxY = 35;
   }
 
-  const pad = 4.0;
+  const pad = Number.isFinite(options?.paddingM) ? options.paddingM : (focusOnTrajectory ? 2.0 : 4.0);
   minX -= pad;
   minY -= pad;
   maxX += pad;
   maxY += pad;
 
-  const widthM = Math.max(10, maxX - minX);
-  const heightM = Math.max(10, maxY - minY);
+  const minSpan = focusOnTrajectory ? 4 : 10;
+  const widthM = Math.max(minSpan, maxX - minX);
+  const heightM = Math.max(minSpan, maxY - minY);
+  const maxDimM = Math.max(widthM, heightM);
+  const ovStroke = (base) => (overviewMode ? Math.max(base, maxDimM * 0.0045).toFixed(3) : String(base));
 
   // En SVG la coordenada Y crece hacia abajo; invertimos Y para mantener +Y hacia arriba (Norte)
   const tx = (x) => (x - minX).toFixed(3);
@@ -138,15 +191,16 @@ export function generateSVGDiagram(
   // 0. Plano de fondo CAD (referencia territorial / vial)
   if (showCadBackground && cadBackgroundEntities && cadBackgroundEntities.length > 0) {
     lines.push(`  <g id="cad-background">`);
+    const cadStrokeW = ovStroke(0.05);
     for (const ent of cadBackgroundEntities) {
       if (!ent.vertices || ent.vertices.length < 2) continue;
       if (ent.closed) {
         lines.push(
-          `    <polygon points="${polyToPointsAttr(ent.vertices)}" fill="#e2e8f0" fill-opacity="0.35" stroke="#94a3b8" stroke-width="0.05" />`
+          `    <polygon points="${polyToPointsAttr(ent.vertices)}" fill="#e2e8f0" fill-opacity="0.35" stroke="#94a3b8" stroke-width="${cadStrokeW}" />`
         );
       } else {
         lines.push(
-          `    <polyline points="${polyToPointsAttr(ent.vertices)}" fill="none" stroke="#94a3b8" stroke-width="0.05" stroke-dasharray="0.25 0.15" />`
+          `    <polyline points="${polyToPointsAttr(ent.vertices)}" fill="none" stroke="#94a3b8" stroke-width="${cadStrokeW}" stroke-dasharray="0.25 0.15" />`
         );
       }
     }
@@ -175,11 +229,12 @@ export function generateSVGDiagram(
 
   // 2. Envolvente física de barrido
   if (showEnvelope) {
+    const envStrokeW = ovStroke(0.11);
     lines.push(`  <g id="swept-envelope">`);
     if (simResult.envelope && simResult.envelope.length >= 3) {
       const envD = pathToSvgD(simResult.envelope, simResult.envelopeHoles);
       lines.push(
-        `    <path d="${envD}" fill="#fecaca" fill-opacity="0.35" fill-rule="evenodd" stroke="#dc2626" stroke-width="0.11" />`
+        `    <path d="${envD}" fill="#fecaca" fill-opacity="0.35" fill-rule="evenodd" stroke="#dc2626" stroke-width="${envStrokeW}" />`
       );
     } else {
       for (let i = 0; i < simResult.states.length; i += 2) {
@@ -195,12 +250,12 @@ export function generateSVGDiagram(
       }
       if (simResult.leftBoundary && simResult.leftBoundary.length > 1) {
         lines.push(
-          `    <polyline points="${polyToPointsAttr(simResult.leftBoundary)}" fill="none" stroke="#dc2626" stroke-width="0.11" />`
+          `    <polyline points="${polyToPointsAttr(simResult.leftBoundary)}" fill="none" stroke="#dc2626" stroke-width="${envStrokeW}" />`
         );
       }
       if (simResult.rightBoundary && simResult.rightBoundary.length > 1) {
         lines.push(
-          `    <polyline points="${polyToPointsAttr(simResult.rightBoundary)}" fill="none" stroke="#dc2626" stroke-width="0.11" />`
+          `    <polyline points="${polyToPointsAttr(simResult.rightBoundary)}" fill="none" stroke="#dc2626" stroke-width="${envStrokeW}" />`
         );
       }
     }
@@ -209,6 +264,8 @@ export function generateSVGDiagram(
 
   // 3. Obstáculos del entorno
   if (showObstacles && obstacles && obstacles.length > 0) {
+    const obsOpenW = ovStroke(0.16);
+    const obsClosedW = ovStroke(0.12);
     lines.push(`  <g id="obstacles">`);
     for (const obs of obstacles) {
       if (obs.enabled === false) continue;
@@ -217,11 +274,11 @@ export function generateSVGDiagram(
       const color = obs.color || "#dc2626";
       if (isOpen) {
         lines.push(
-          `    <polyline points="${polyToPointsAttr(verts)}" fill="none" stroke="${color}" stroke-width="0.16" />`
+          `    <polyline points="${polyToPointsAttr(verts)}" fill="none" stroke="${color}" stroke-width="${obsOpenW}" />`
         );
       } else {
         lines.push(
-          `    <polygon points="${polyToPointsAttr(verts)}" fill="${color}" fill-opacity="0.22" stroke="${color}" stroke-width="0.12" />`
+          `    <polygon points="${polyToPointsAttr(verts)}" fill="${color}" fill-opacity="0.22" stroke="${color}" stroke-width="${obsClosedW}" />`
         );
       }
     }
@@ -309,17 +366,35 @@ export function generateSVGDiagram(
     lines.push(`  </g>`);
   }
 
-  // 8. Barra de escala gráfica (0 a 5 m) y flecha Norte
-  const sbX = minX + 1.8;
-  const sbY = minY + 1.4;
-  lines.push(
-    `  <g id="scale-bar">`,
-    `    <line x1="${tx(sbX)}" y1="${ty(sbY)}" x2="${tx(sbX + 5)}" y2="${ty(sbY)}" stroke="#0f172a" stroke-width="0.12" />`,
-    `    <line x1="${tx(sbX)}" y1="${ty(sbY - 0.3)}" x2="${tx(sbX)}" y2="${ty(sbY + 0.3)}" stroke="#0f172a" stroke-width="0.10" />`,
-    `    <line x1="${tx(sbX + 5)}" y1="${ty(sbY - 0.3)}" x2="${tx(sbX + 5)}" y2="${ty(sbY + 0.3)}" stroke="#0f172a" stroke-width="0.10" />`,
-    `    <text x="${tx(sbX + 2.5)}" y="${ty(sbY + 0.45)}" font-family="sans-serif" font-size="0.65" font-weight="bold" fill="#0f172a" text-anchor="middle">Escala gráfica: 5,00 m</text>`,
-    `  </g>`
-  );
+  // 8. Barra de escala gráfica y encuadre de detalle en vista general
+  if (!overviewMode) {
+    const scaleBarLen = widthM >= 10 ? 5 : 2;
+    const sbX = minX + Math.min(1.8, widthM * 0.08);
+    const sbY = minY + Math.min(1.4, heightM * 0.08);
+    lines.push(
+      `  <g id="scale-bar">`,
+      `    <line x1="${tx(sbX)}" y1="${ty(sbY)}" x2="${tx(sbX + scaleBarLen)}" y2="${ty(sbY)}" stroke="#0f172a" stroke-width="0.12" />`,
+      `    <line x1="${tx(sbX)}" y1="${ty(sbY - 0.3)}" x2="${tx(sbX)}" y2="${ty(sbY + 0.3)}" stroke="#0f172a" stroke-width="0.10" />`,
+      `    <line x1="${tx(sbX + scaleBarLen)}" y1="${ty(sbY - 0.3)}" x2="${tx(sbX + scaleBarLen)}" y2="${ty(sbY + 0.3)}" stroke="#0f172a" stroke-width="0.10" />`,
+      `    <text x="${tx(sbX + scaleBarLen * 0.5)}" y="${ty(sbY + 0.45)}" font-family="sans-serif" font-size="0.65" font-weight="bold" fill="#0f172a" text-anchor="middle">Escala gráfica: ${scaleBarLen},00 m</text>`,
+      `  </g>`
+    );
+  }
+
+  if (highlightBbox && Number.isFinite(highlightBbox.minX) && Number.isFinite(highlightBbox.maxX)) {
+    const hx = tx(highlightBbox.minX);
+    const hy = ty(highlightBbox.maxY);
+    const hw = Math.max(0.5, highlightBbox.maxX - highlightBbox.minX).toFixed(3);
+    const hh = Math.max(0.5, highlightBbox.maxY - highlightBbox.minY).toFixed(3);
+    const sw = Math.max(0.25, maxDimM * 0.012).toFixed(3);
+    const dashA = Math.max(0.6, maxDimM * 0.025).toFixed(3);
+    const dashB = Math.max(0.4, maxDimM * 0.015).toFixed(3);
+    lines.push(
+      `  <g id="detail-viewport-indicator">`,
+      `    <rect x="${hx}" y="${hy}" width="${hw}" height="${hh}" fill="#0284c7" fill-opacity="0.12" stroke="#0284c7" stroke-width="${sw}" stroke-dasharray="${dashA} ${dashB}" />`,
+      `  </g>`
+    );
+  }
 
   lines.push(`</svg>`);
   return lines.join("\n");
@@ -531,7 +606,8 @@ export function openStructuredTechnicalReport({
   interferenceReport,
   obstacles,
   layerVisibility,
-  cadBackgroundEntities = []
+  cadBackgroundEntities = [],
+  diligence = {}
 }) {
   const nowStr = new Date().toLocaleString("es-ES", {
     dateStyle: "long",
@@ -539,12 +615,22 @@ export function openStructuredTechnicalReport({
   });
   const metrics = computeDerivedVehicleMetrics(vehicle);
   const compliance = buildNormativeComplianceSummary({ vehicle, maneuver, simResult, interferenceReport });
+  const detailBbox = computeTrajectoryBbox(simResult, 2.0);
   const svgDiagram = generateSVGDiagram(
     simResult,
     interferenceReport,
     obstacles,
     layerVisibility,
-    cadBackgroundEntities
+    cadBackgroundEntities,
+    { focusOnTrajectory: true, paddingM: 2.0 }
+  );
+  const overviewSvgDiagram = generateSVGDiagram(
+    simResult,
+    interferenceReport,
+    obstacles,
+    { ...layerVisibility, wheelTraces: false, ghosts: false, dimensions: false },
+    cadBackgroundEntities,
+    { focusOnTrajectory: false, overviewMode: true, highlightBbox: detailBbox }
   );
 
   const segmentsRows = (maneuver.segments || [])
@@ -597,6 +683,11 @@ export function openStructuredTechnicalReport({
 
   const safeProjectName = escapeHTML(projectName);
   const safeScenarioName = escapeHTML(scenarioName);
+  const dots = "...................................................";
+  const safeAuthor = escapeHTML((diligence?.author || "").trim()) || dots;
+  const safeCollegiate = escapeHTML((diligence?.collegiate || "").trim()) || dots;
+  const safeOrganization = escapeHTML((diligence?.organization || "").trim()) || dots;
+  const safeDiligenceDate = escapeHTML((diligence?.date || "").trim());
 
   const mdContent = generateMarkdownTechnicalReport({
     projectName,
@@ -605,7 +696,8 @@ export function openStructuredTechnicalReport({
     maneuver,
     simResult,
     interferenceReport,
-    obstacles
+    obstacles,
+    diligence
   });
 
   const reportHtml = `<!DOCTYPE html>
@@ -681,11 +773,53 @@ export function openStructuredTechnicalReport({
       gap: 12px;
       page-break-inside: avoid;
     }
-    .diagram-box {
+    .diagram-wrapper {
+      position: relative;
       width: 100%;
       height: 360px;
       margin: 8px 0;
       page-break-inside: avoid;
+    }
+    .diagram-box {
+      width: 100%;
+      height: 100%;
+    }
+    .diagram-overview-inset {
+      position: absolute;
+      top: 8px;
+      left: 8px;
+      width: 165px;
+      height: 120px;
+      background: rgba(255, 255, 255, 0.95);
+      border: 1.5px solid #334155;
+      border-radius: 5px;
+      padding: 3px;
+      box-shadow: 0 2px 6px rgba(15, 23, 42, 0.16);
+      z-index: 5;
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+    }
+    .diagram-overview-inset .overview-label {
+      font-size: 8.5px;
+      font-weight: 700;
+      color: #0f172a;
+      text-transform: uppercase;
+      letter-spacing: 0.3px;
+      margin-bottom: 2px;
+      text-align: center;
+      background: #e2e8f0;
+      border-radius: 2px;
+      padding: 1px 4px;
+      flex-shrink: 0;
+    }
+    .diagram-overview-inset svg {
+      flex: 1;
+      width: 100%;
+      height: 100%;
+      border: none !important;
+      border-radius: 2px !important;
+      min-height: 0;
     }
     .badge-verified {
       display: inline-block;
@@ -811,7 +945,13 @@ export function openStructuredTechnicalReport({
   </table>
 
   <h2>3. Planta técnica de la trayectoria, huellas de ruedas y envolvente de barrido</h2>
-  <div class="diagram-box">${svgDiagram}</div>
+  <div class="diagram-wrapper">
+    <div class="diagram-overview-inset" title="Plano general de situación (referencia completa)">
+      <div class="overview-label">Situación general</div>
+      ${overviewSvgDiagram}
+    </div>
+    <div class="diagram-box">${svgDiagram}</div>
+  </div>
   <div style="font-size:10px; color:#475569; display:flex; justify-content:space-between;">
     <span><strong>Leyenda:</strong> Contorno rojo = Envolvente física barrida &bull; Banda amarilla = Margen de seguridad (${(interferenceReport?.safetyMarginM ?? 0.30).toFixed(2)} m) &bull; Azul = Eje directriz &bull; Verde = Eje motriz ref. &bull; Naranja = Quinta rueda &bull; Morado = Centro trídem semirremolque &bull; Gris discontinuo = Huellas de ruedas.</span>
     <span>Unidades: metros (SI)</span>
@@ -895,13 +1035,13 @@ export function openStructuredTechnicalReport({
   <div class="grid-2" style="margin-top:14px; page-break-inside:avoid;">
     <div style="border:1px solid #cbd5e1; padding:8px 12px; border-radius:4px; font-size:10.5px;">
       <strong>Diligencia técnica del proyecto:</strong><br>
-      <strong>Autor del estudio:</strong> ...................................................<br>
-      <strong>Colegiado n.º:</strong> ...................................................<br>
-      <strong>Organismo o consultora:</strong> ...................................................
+      <strong>Autor del estudio:</strong> ${safeAuthor}<br>
+      <strong>Colegiado n.º:</strong> ${safeCollegiate}<br>
+      <strong>Organismo o consultora:</strong> ${safeOrganization}
     </div>
     <div style="border:1px solid #cbd5e1; padding:8px 12px; border-radius:4px; font-size:10.5px; text-align:center;">
-      <strong>Firma y fecha de conformidad:</strong><br><br><br>
-      <span>Fdo.: .....................................................................</span>
+      <strong>Firma y fecha de conformidad:</strong>${safeDiligenceDate ? `<br><span style="color:#334155;">Fecha: ${safeDiligenceDate}</span>` : "<br>"}<br><br>
+      <span>Fdo.: ${safeAuthor !== dots ? safeAuthor : "....................................................................."}</span>
     </div>
   </div>
 
@@ -955,7 +1095,8 @@ export function generateMarkdownTechnicalReport({
   maneuver,
   simResult,
   interferenceReport,
-  obstacles = []
+  obstacles = [],
+  diligence = {}
 }) {
   const nowStr = new Date().toLocaleString("es-ES", {
     dateStyle: "long",
@@ -1075,10 +1216,10 @@ ${compliance.globalCompliant
 
 ## 5. Diligencia de responsabilidad y visado facultativo
 
-- **Autor del estudio:** ...................................................
-- **N.º de colegiado:** ...................................................
-- **Organismo o consultora:** ...................................................
-- **Fecha y firma:** ...................................................
+- **Autor del estudio:** ${(diligence?.author || "").trim() || "..................................................."}
+- **N.º de colegiado:** ${(diligence?.collegiate || "").trim() || "..................................................."}
+- **Organismo o consultora:** ${(diligence?.organization || "").trim() || "..................................................."}
+- **Fecha y firma:** ${(diligence?.date || "").trim() || "..................................................."}
 
 ---
 *Documento generado automáticamente por TurnSim / Open Swept Path Analyzer (OSPA).*  

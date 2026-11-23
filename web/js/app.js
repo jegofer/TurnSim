@@ -327,11 +327,33 @@ export class SweptPathApp {
     if (btnRedo) btnRedo.disabled = !this.history.canRedo();
   }
 
+  _getDiligenceData() {
+    return {
+      author: document.getElementById("inp-diligence-author")?.value.trim() || "",
+      collegiate: document.getElementById("inp-diligence-collegiate")?.value.trim() || "",
+      organization: document.getElementById("inp-diligence-organization")?.value.trim() || "",
+      date: document.getElementById("inp-diligence-date")?.value.trim() || ""
+    };
+  }
+
+  _setDiligenceData(diligence = {}) {
+    const setVal = (id, val) => {
+      const el = document.getElementById(id);
+      if (el && typeof val === "string") el.value = val;
+    };
+    setVal("inp-diligence-author", diligence.author ?? "");
+    setVal("inp-diligence-collegiate", diligence.collegiate ?? "");
+    setVal("inp-diligence-organization", diligence.organization ?? "");
+    setVal("inp-diligence-date", diligence.date ?? "");
+  }
+
   exportSessionJSON() {
     const sessionData = {
       turnsim_version: "1.0.0",
       application: "TurnSim / Open Swept Path Analyzer (OSPA)",
       timestamp: new Date().toISOString(),
+      projectName: document.getElementById("inp-project-name")?.value.trim() || "",
+      diligence: this._getDiligenceData(),
       vehicle: this.vehicle,
       selectedVehicleId: this.selectedVehicleId,
       selectedTractorKey: this.selectedTractorKey,
@@ -367,6 +389,13 @@ export class SweptPathApp {
           throw new Error("El archivo no presenta la estructura requerida de proyecto TurnSim.");
         }
         this.vehicle = data.vehicle;
+        if (typeof data.projectName === "string") {
+          const projEl = document.getElementById("inp-project-name");
+          if (projEl) projEl.value = data.projectName;
+        }
+        if (data.diligence && typeof data.diligence === "object") {
+          this._setDiligenceData(data.diligence);
+        }
         this.selectedVehicleId = data.selectedVehicleId || "custom";
         this.selectedTractorKey = data.selectedTractorKey || (data.vehicle.tractorKey || "renault_t_480");
         this.selectedTrailerKey = data.selectedTrailerKey || (data.vehicle.trailerKey || "schmitz_sko_cool");
@@ -1457,7 +1486,8 @@ export class SweptPathApp {
         interferenceReport: this.interferenceReport,
         obstacles: this.obstacles,
         layerVisibility: this.viewer2D.layers,
-        cadBackgroundEntities: this.cadBackgroundEntities
+        cadBackgroundEntities: this.cadBackgroundEntities,
+        diligence: this._getDiligenceData()
       });
     });
 
@@ -1494,7 +1524,8 @@ export class SweptPathApp {
           maneuver: this.maneuver,
           simResult: this.simResult,
           interferenceReport: this.interferenceReport,
-          obstacles: this.obstacles
+          obstacles: this.obstacles,
+          diligence: this._getDiligenceData()
         });
       });
     }

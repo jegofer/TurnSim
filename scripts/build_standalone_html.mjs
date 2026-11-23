@@ -550,6 +550,26 @@ ${cssContent}
             <details class="panel-section" open>
               <summary><h2>F. Informes técnicos y exportación CAD</h2></summary>
               <div class="section-body">
+                <div class="subsection-title" style="margin-top:0;" data-i18n="diligence_section_title">Diligencia técnica del proyecto</div>
+                <div class="form-group">
+                  <label for="inp-diligence-author" data-i18n="lbl_diligence_author">Autor del estudio</label>
+                  <input type="text" id="inp-diligence-author" placeholder="Nombre y apellidos del técnico" />
+                </div>
+                <div class="form-row">
+                  <div class="form-group">
+                    <label for="inp-diligence-collegiate" data-i18n="lbl_diligence_collegiate">Colegiado n.º</label>
+                    <input type="text" id="inp-diligence-collegiate" placeholder="N.º colegiado" />
+                  </div>
+                  <div class="form-group">
+                    <label for="inp-diligence-date" data-i18n="lbl_diligence_date">Fecha</label>
+                    <input type="text" id="inp-diligence-date" placeholder="Ej. 23/11/2026" />
+                  </div>
+                </div>
+                <div class="form-group" style="margin-bottom:10px;">
+                  <label for="inp-diligence-organization" data-i18n="lbl_diligence_organization">Organismo o consultora</label>
+                  <input type="text" id="inp-diligence-organization" placeholder="Empresa, consultora u organismo" />
+                </div>
+
                 <button type="button" id="btn-export-report-pdf" class="btn btn-primary btn-block">
                   📄 1. Generar Informe Técnico PDF Estructurado
                 </button>

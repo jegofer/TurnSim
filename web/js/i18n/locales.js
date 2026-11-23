@@ -102,6 +102,11 @@ export const LOCALES = {
     // Sección E
     section_e_title: "E. Informes técnicos y exportación CAD",
     lbl_project_name: "Título del proyecto / expediente",
+    diligence_section_title: "Diligencia técnica del proyecto",
+    lbl_diligence_author: "Autor del estudio",
+    lbl_diligence_collegiate: "Colegiado n.º",
+    lbl_diligence_date: "Fecha",
+    lbl_diligence_organization: "Organismo o consultora",
     btn_export_pdf: "📄 1. Generar Informe Técnico PDF Estructurado",
     btn_export_snapshot: "🖼️ 2. Exportación Gráfica del Visor (PDF / PNG)",
     btn_export_dxf: "📐 Descargar DXF (CAD)",
@@ -261,6 +266,11 @@ export const LOCALES = {
     // Section E
     section_e_title: "E. Technical Reports & CAD Export",
     lbl_project_name: "Project / Case Title",
+    diligence_section_title: "Project Technical Sign-off",
+    lbl_diligence_author: "Study Author",
+    lbl_diligence_collegiate: "License / Reg. No.",
+    lbl_diligence_date: "Date",
+    lbl_diligence_organization: "Organization / Consultancy",
     btn_export_pdf: "📄 1. Generate Structured Technical PDF Report",
     btn_export_snapshot: "🖼️ 2. Graphic Viewport Export (PDF / PNG)",
     btn_export_dxf: "📐 Download DXF (CAD)",

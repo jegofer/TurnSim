@@ -1816,6 +1816,73 @@ let simTrackingForRateTest = null;
   );
 }
 
+// -----------------------------------------------------------------------------
+// TEST-44: SVG de detalle (bbox trayectoria + 2m), plano general y diligencia
+// -----------------------------------------------------------------------------
+{
+  const { VEHICLE_CATALOG } = await import("../web/js/models/vehicles.js");
+  const veh = VEHICLE_CATALOG.spain_camion_articulado_t;
+  const maneuver = {
+    startPose: { x: 0, y: 0, headingDeg: 0, initialArticulationDeg: 0 },
+    segments: [
+      { type: "straight", length: 12.0, direction: 1 },
+      { type: "arc", radius: 12.0, angle: 90.0, direction: 1 }
+    ]
+  };
+  const sim = buildCompleteSimulationResult(veh, maneuver, { stepSizeM: 0.25 });
+  const rep = evaluateObstacleInterferences(sim, [], 0.30);
+
+  // Entidad CAD lejana (500 m x 500 m) que antes expandía el viewBox completo
+  const farCadEntities = [
+    { vertices: [[-200, -200], [300, -200], [300, 300], [-200, 300]], closed: true }
+  ];
+
+  const detailSvg = generateSVGDiagram(sim, rep, [], {}, farCadEntities, {
+    focusOnTrajectory: true,
+    paddingM: 2.0
+  });
+  const overviewSvg = generateSVGDiagram(sim, rep, [], {}, farCadEntities, {
+    focusOnTrajectory: false,
+    overviewMode: true,
+    highlightBbox: { minX: -5, minY: -5, maxX: 25, maxY: 25 }
+  });
+
+  const detailVbMatch = detailSvg.match(/viewBox="0 0 ([\d.]+) ([\d.]+)"/);
+  const overviewVbMatch = overviewSvg.match(/viewBox="0 0 ([\d.]+) ([\d.]+)"/);
+  const detailW = detailVbMatch ? Number(detailVbMatch[1]) : 9999;
+  const overviewW = overviewVbMatch ? Number(overviewVbMatch[1]) : 0;
+
+  const mdWithDiligence = generateMarkdownTechnicalReport({
+    projectName: "Proyecto Enlace M-501",
+    scenarioName: "Glorieta Sur",
+    vehicle: veh,
+    maneuver,
+    simResult: sim,
+    interferenceReport: rep,
+    diligence: {
+      author: "Ing. Ana García",
+      collegiate: "28410",
+      organization: "Consultoría Viaria Ibérica",
+      date: "23/11/2026"
+    }
+  });
+
+  const detailTight = detailW < 60 && overviewW > 450;
+  const hasViewportIndicator = overviewSvg.includes('id="detail-viewport-indicator"');
+  const hasDiligenceFields =
+    mdWithDiligence.includes("Ing. Ana García") &&
+    mdWithDiligence.includes("28410") &&
+    mdWithDiligence.includes("Consultoría Viaria Ibérica") &&
+    mdWithDiligence.includes("23/11/2026");
+
+  assertCondition(
+    "TEST-44",
+    `Encuadre SVG de detalle (bbox trayectoria + 2m), plano general de referencia y diligencia técnica`,
+    detailTight && hasViewportIndicator && hasDiligenceFields,
+    `detailW=${detailW.toFixed(2)} m, overviewW=${overviewW.toFixed(2)} m, indicator=${hasViewportIndicator}, diligence=${hasDiligenceFields}`
+  );
+}
+
 console.log("\n==================================================================");
 console.log(` RESUMEN DE VERIFICACIÓN: ${passed} superadas, ${failed} fallidas`);
 console.log("==================================================================");
