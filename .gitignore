@@ -57,3 +57,13 @@ htmlcov/
 # Archivos temporales de visualización local
 local_scratch/
 *.tmp
+
+# Archivos de contexto y memoria técnica persistente (uso local)
+ARCHIVOS.md
+CHANGELOG.md
+CONTEXTO_SESION.md
+DECISIONES.md
+DME.md
+ESTADO_PROYECTO.md
+INCIDENCIAS.md
+TODO.md
