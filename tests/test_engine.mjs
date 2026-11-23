@@ -1934,6 +1934,103 @@ let simTrackingForRateTest = null;
   );
 }
 
+// -----------------------------------------------------------------------------
+// TEST-46: Maniobras combinadas avance + marcha atrás desde vértice de inversión
+//          (spline, fillet, front_axle, rear_axle y detección de cúspides)
+// -----------------------------------------------------------------------------
+{
+  const { VEHICLE_CATALOG } = await import("../web/js/models/vehicles.js");
+  const { simulateManeuver, buildSegmentsFromWaypoints, splitWaypointsByDirection } = await import("../web/js/engine/kinematics.js");
+
+  const veh = VEHICLE_CATALOG.spain_camion_articulado_t;
+
+  // 1. Waypoints con vértice explícito de cambio a marcha atrás en P2
+  const mixedWaypoints = [
+    { x: 0, y: 0, direction: 1, directionExplicit: true },
+    { x: 18, y: 0, direction: 1 },
+    { x: 32, y: 8, direction: -1, directionExplicit: true },
+    { x: 18, y: 12, direction: -1 },
+    { x: 4, y: 12, direction: -1 }
+  ];
+
+  // Comprobar spline con front_axle y rear_axle
+  const builtFront = buildSegmentsFromWaypoints(mixedWaypoints, 12.5, 1, {
+    mode: "spline",
+    vehicle: veh,
+    steeringReferencePoint: "front_axle"
+  });
+  const builtRear = buildSegmentsFromWaypoints(mixedWaypoints, 12.5, 1, {
+    mode: "spline",
+    vehicle: veh,
+    steeringReferencePoint: "rear_axle"
+  });
+  const builtFillet = buildSegmentsFromWaypoints(mixedWaypoints, 12.5, 1, {
+    mode: "fillet",
+    vehicle: veh
+  });
+
+  const twoDirsSpline =
+    builtFront.segments.length === 2 &&
+    builtFront.segments[0].direction === 1 &&
+    builtFront.segments[1].direction === -1;
+
+  const simFront = simulateManeuver(veh, builtFront, { straightStep: 0.1, steeringReferencePoint: "front_axle" });
+  const simRear = simulateManeuver(veh, builtRear, { straightStep: 0.1, steeringReferencePoint: "rear_axle" });
+
+  // Verificar que en la transición avance -> retroceso no hay saltos de posición ni de orientación ni NaN
+  let maxJumpPos = 0;
+  let maxJumpHeading = 0;
+  let hasNaN = false;
+  let maxSignedDist = -Infinity;
+  let finalSignedDist = 0;
+  for (let i = 1; i < simFront.states.length; i++) {
+    const prev = simFront.states[i - 1];
+    const curr = simFront.states[i];
+    if (!Number.isFinite(curr.x) || !Number.isFinite(curr.y) || !Number.isFinite(curr.steerAngleDeg)) {
+      hasNaN = true;
+    }
+    const dp = Math.hypot(curr.x - prev.x, curr.y - prev.y);
+    let dh = Math.abs(curr.heading - prev.heading);
+    if (dh > Math.PI) dh = 2 * Math.PI - dh;
+    if (dp > maxJumpPos) maxJumpPos = dp;
+    if (dh > maxJumpHeading) maxJumpHeading = dh;
+    if (curr.signedDist > maxSignedDist) maxSignedDist = curr.signedDist;
+    finalSignedDist = curr.signedDist;
+  }
+
+  // En una maniobra de avance seguida de retroceso, signedDist alcanza un máximo positivo y luego decrece
+  const signedDistReversed = maxSignedDist > 20 && finalSignedDist < maxSignedDist - 15;
+
+  // 2. Detección automática de cúspides (Opción C) con quiebro > 125° sin etiquetas explícitas
+  const cuspAutoWps = [
+    [0, 0],
+    [25, 0],
+    [10, 5] // quiebro ~161° -> debe invertir automáticamente en P2
+  ];
+  const autoChains = splitWaypointsByDirection(cuspAutoWps, 1, { autoDetectCusps: true });
+  const autoDetected = autoChains.length === 2 && autoChains[0].direction === 1 && autoChains[1].direction === -1;
+
+  // 3. Envolvente combinada completa sin errores
+  const fullMixed = buildCompleteSimulationResult(veh, builtFront, { safetyMarginM: 0.30 });
+  const envOk = fullMixed.envelope.length > 50 && fullMixed.summary.maxSweptWidthM > 2.5;
+
+  assertCondition(
+    "TEST-46",
+    `Maniobras combinadas avance/marcha atrás en vértices, continuidad G1 y detección automática de cúspides`,
+    twoDirsSpline &&
+      builtFillet.segments.some((s) => s.direction === 1) &&
+      builtFillet.segments.some((s) => s.direction === -1) &&
+      !hasNaN &&
+      maxJumpPos < 0.6 &&
+      maxJumpHeading < 0.25 &&
+      signedDistReversed &&
+      autoDetected &&
+      envOk &&
+      simRear.states.length > 50,
+    `segs=${builtFront.segments.length}, maxJump=${maxJumpPos.toFixed(3)} m, maxDH=${(maxJumpHeading * 180 / Math.PI).toFixed(2)}°, maxSD=${maxSignedDist.toFixed(1)}->${finalSignedDist.toFixed(1)} m, autoCusp=${autoDetected}, maxW=${fullMixed.summary.maxSweptWidthM} m`
+  );
+}
+
 console.log("\n==================================================================");
 console.log(` RESUMEN DE VERIFICACIÓN: ${passed} superadas, ${failed} fallidas`);
 console.log("==================================================================");

@@ -383,23 +383,74 @@ export function sampleCatmullRomSpline(waypoints, options = {}) {
   if (pts.length < 2) return pts.map((p) => ({ x: p.x, y: p.y, headingRad: 0, curvature: 0, radius: Infinity }));
 
   const stepM = Math.max(0.02, Number(options.stepM || 0.20));
+  const hasInitTan = Number.isFinite(options.initialTangentRad);
   const n = pts.length;
 
   if (n === 2) {
     const dx = pts[1].x - pts[0].x;
     const dy = pts[1].y - pts[0].y;
     const len = Math.hypot(dx, dy);
-    const headingRad = Math.atan2(dy, dx);
-    const steps = Math.max(2, Math.ceil(len / stepM));
+    const directHeading = Math.atan2(dy, dx);
+    const angleDiff = hasInitTan ? Math.abs(normalizeAngle(options.initialTangentRad - directHeading)) : 0;
+
+    if (!hasInitTan || angleDiff < 0.015 || len < 1e-3) {
+      const steps = Math.max(2, Math.ceil(len / stepM));
+      const res = [];
+      for (let i = 0; i <= steps; i++) {
+        const f = i / steps;
+        res.push({
+          x: Number((pts[0].x + f * dx).toFixed(4)),
+          y: Number((pts[0].y + f * dy).toFixed(4)),
+          headingRad: directHeading,
+          curvature: 0,
+          radius: Infinity
+        });
+      }
+      return res;
+    }
+
+    // Hermite cúbico de 1 tramo acoplando tangente inicial al rumbo previo del vehículo
+    const h = Math.max(1e-4, len);
+    const mx0 = Math.cos(options.initialTangentRad);
+    const my0 = Math.sin(options.initialTangentRad);
+    const mx1 = dx / h;
+    const my1 = dy / h;
+    const steps = Math.max(4, Math.ceil(h / stepM));
     const res = [];
-    for (let i = 0; i <= steps; i++) {
-      const f = i / steps;
+    for (let k = 0; k <= steps; k++) {
+      const t = k / steps;
+      const t2 = t * t;
+      const t3 = t2 * t;
+      const h00 = 2 * t3 - 3 * t2 + 1;
+      const h10 = (t3 - 2 * t2 + t) * h;
+      const h01 = -2 * t3 + 3 * t2;
+      const h11 = (t3 - t2) * h;
+      const dh00 = (6 * t2 - 6 * t) / h;
+      const dh10 = 3 * t2 - 4 * t + 1;
+      const dh01 = (-6 * t2 + 6 * t) / h;
+      const dh11 = 3 * t2 - 2 * t;
+      const d2h00 = (12 * t - 6) / (h * h);
+      const d2h10 = (6 * t - 4) / h;
+      const d2h01 = (-12 * t + 6) / (h * h);
+      const d2h11 = (6 * t - 2) / h;
+
+      const x = h00 * pts[0].x + h10 * mx0 + h01 * pts[1].x + h11 * mx1;
+      const y = h00 * pts[0].y + h10 * my0 + h01 * pts[1].y + h11 * my1;
+      const ddx = dh00 * pts[0].x + dh10 * mx0 + dh01 * pts[1].x + dh11 * mx1;
+      const ddy = dh00 * pts[0].y + dh10 * my0 + dh01 * pts[1].y + dh11 * my1;
+      const d2x = d2h00 * pts[0].x + d2h10 * mx0 + d2h01 * pts[1].x + d2h11 * mx1;
+      const d2y = d2h00 * pts[0].y + d2h10 * my0 + d2h01 * pts[1].y + d2h11 * my1;
+
+      const headingRad = Math.atan2(ddy, ddx);
+      const speedSq = ddx * ddx + ddy * ddy;
+      const curvature = speedSq > 1e-6 ? (ddx * d2y - ddy * d2x) / Math.pow(speedSq, 1.5) : 0;
+      const rawRadius = Math.abs(curvature) > 1e-4 ? 1 / Math.abs(curvature) : 99999.0;
       res.push({
-        x: Number((pts[0].x + f * dx).toFixed(4)),
-        y: Number((pts[0].y + f * dy).toFixed(4)),
+        x: Number(x.toFixed(4)),
+        y: Number(y.toFixed(4)),
         headingRad,
-        curvature: 0,
-        radius: Infinity
+        curvature,
+        radius: Number(Math.min(99999.0, rawRadius).toFixed(2))
       });
     }
     return res;
@@ -445,6 +496,11 @@ export function sampleCatmullRomSpline(waypoints, options = {}) {
 
   const mx = calcPchipTangents(h_d, deltaX);
   const my = calcPchipTangents(h_d, deltaY);
+
+  if (hasInitTan) {
+    mx[0] = Math.cos(options.initialTangentRad);
+    my[0] = Math.sin(options.initialTangentRad);
+  }
 
   const sampled = [];
 
@@ -505,71 +561,175 @@ export function sampleCatmullRomSpline(waypoints, options = {}) {
 export const samplePchipSpline = sampleCatmullRomSpline;
 
 /**
- * Genera tramos de maniobra a partir de waypoints interpolados con Spline CAD continua.
+ * Normaliza una lista de waypoints y los divide en sub-cadenas cada vez que cambia el sentido de marcha
+ * (vértice de inversión / cúspide). Soporta detección automática opcional de cúspides por ángulo > 125°.
  *
- * @param {Array<{x: number, y: number}|[number, number]>} waypoints Vértices de paso
- * @param {number} direction Sentido de marcha (+1 avance, -1 marcha atrás)
- * @param {object} options Opciones de discretización { stepM, vehicle, steeringReferencePoint }
+ * @returns {Array<{ direction: number, points: Array<{x: number, y: number, radius: number, direction: number}> }>}
+ */
+export function splitWaypointsByDirection(waypoints, defaultDirection = 1, options = {}) {
+  const defaultRadius = Number.isFinite(options.defaultRadius) ? options.defaultRadius : 12.5;
+  const autoDetectCusps = Boolean(options.autoDetectCusps);
+  const cuspThresholdRad = ((options.cuspAngleDeg ?? 125) * Math.PI) / 180;
+
+  const rawPts = (waypoints || []).map((p) => {
+    const px = Array.isArray(p) ? p[0] : (p?.x !== undefined ? p.x : p?.[0]);
+    const py = Array.isArray(p) ? p[1] : (p?.y !== undefined ? p.y : p?.[1]);
+    const r = (p && !Array.isArray(p) && p.radius !== undefined) ? p.radius : defaultRadius;
+    const hasDir = p && !Array.isArray(p) && (p.direction === 1 || p.direction === -1);
+    const dirExplicit = Boolean(p && !Array.isArray(p) && p.directionExplicit);
+    return {
+      x: Number(px),
+      y: Number(py),
+      radius: Number(r),
+      direction: hasDir ? p.direction : null,
+      directionExplicit: dirExplicit
+    };
+  }).filter((p) => Number.isFinite(p.x) && Number.isFinite(p.y));
+
+  if (rawPts.length === 0) return [];
+
+  let activeDir = rawPts[0].direction ?? (defaultDirection === -1 ? -1 : 1);
+  const resolved = [{ ...rawPts[0], direction: activeDir }];
+
+  for (let i = 1; i < rawPts.length; i++) {
+    const curr = rawPts[i];
+    if (curr.direction !== null && (curr.directionExplicit || curr.direction !== activeDir)) {
+      activeDir = curr.direction;
+    } else if (autoDetectCusps && !curr.directionExplicit && i < rawPts.length - 1) {
+      const prev = resolved[i - 1];
+      const next = rawPts[i + 1];
+      const v1x = curr.x - prev.x;
+      const v1y = curr.y - prev.y;
+      const v2x = next.x - curr.x;
+      const v2y = next.y - curr.y;
+      const len1 = Math.hypot(v1x, v1y);
+      const len2 = Math.hypot(v2x, v2y);
+      if (len1 > 0.2 && len2 > 0.2) {
+        const dot = (v1x * v2x + v1y * v2y) / (len1 * len2);
+        const turnAngle = Math.acos(Math.max(-1, Math.min(1, dot)));
+        if (turnAngle >= cuspThresholdRad) {
+          activeDir = activeDir === 1 ? -1 : 1;
+        }
+      }
+    }
+    resolved.push({ ...curr, direction: activeDir });
+  }
+
+  if (resolved.length === 1) {
+    return [{ direction: resolved[0].direction, points: [resolved[0]] }];
+  }
+
+  const chains = [];
+  let chainDir = resolved[0].direction;
+  let currentChain = [resolved[0]];
+
+  for (let i = 1; i < resolved.length; i++) {
+    const pt = resolved[i];
+    currentChain.push(pt);
+    // Si en este vértice cambia el sentido para el tramo siguiente (y no es el último punto),
+    // cerramos la sub-cadena aquí e iniciamos una nueva compartiendo este vértice como cúspide.
+    if (i < resolved.length - 1 && pt.direction !== chainDir) {
+      chains.push({ direction: chainDir, points: currentChain });
+      chainDir = pt.direction;
+      currentChain = [pt];
+    }
+  }
+  if (currentChain.length >= 2) {
+    chains.push({ direction: chainDir, points: currentChain });
+  }
+  return chains;
+}
+
+/**
+ * Genera tramos de maniobra a partir de waypoints interpolados con Spline CAD continua.
+ * Soporta puntos de inversión de marcha (avance <-> marcha atrás) en vértices intermedios.
+ *
+ * @param {Array<{x: number, y: number, direction?: number}|[number, number]>} waypoints Vértices de paso
+ * @param {number} direction Sentido de marcha inicial (+1 avance, -1 marcha atrás)
+ * @param {object} options Opciones de discretización { stepM, vehicle, steeringReferencePoint, autoDetectCusps }
  * @returns {{ startPose: { x: number, y: number, headingDeg: number }, segments: Array, splineSamples: Array, minRadius: number }}
  */
 export function buildSegmentsFromSplineWaypoints(waypoints, direction = 1, options = {}) {
-  const sampledPts = sampleCatmullRomSpline(waypoints, options);
-  if (!sampledPts || sampledPts.length < 2) {
+  const chains = splitWaypointsByDirection(waypoints, direction, options);
+  if (!chains.length || chains[0].points.length < 2) {
     const p0 = waypoints?.[0];
     const px = Array.isArray(p0) ? p0[0] : (p0?.x ?? 0);
     const py = Array.isArray(p0) ? p0[1] : (p0?.y ?? 0);
     return {
       startPose: { x: px, y: py, headingDeg: 0 },
       segments: [],
-      splineSamples: sampledPts,
+      splineSamples: [],
       minRadius: Infinity
     };
   }
 
-  const p0 = sampledPts[0];
-  const p1 = sampledPts[1];
-  const baseHeading = p0.headingRad !== undefined ? p0.headingRad : Math.atan2(p1.y - p0.y, p1.x - p0.x);
-  const startHeadingRad = direction >= 0 ? baseHeading : normalizeAngle(baseHeading + Math.PI);
-  const headingDeg = ((startHeadingRad * 180) / Math.PI + 360) % 360;
-
   const steeringRef = options.steeringReferencePoint || (options.vehicle?.steeringReferencePoint) || "rear_axle";
   const Lwb = options.vehicle?.tractor?.wheelbase || 3.80;
 
-  let startX = p0.x;
-  let startY = p0.y;
-  if (steeringRef === "front_axle") {
-    // Si la referencia es el eje director delantero, el eje motriz trasero se sitúa
-    // exactamente a distancia Lwb hacia atrás para que el eje director comience exactamente en P0
-    startX = p0.x - Lwb * Math.cos(startHeadingRad);
-    startY = p0.y - Lwb * Math.sin(startHeadingRad);
-  }
+  const segments = [];
+  const allSamples = [];
+  let globalMinRadius = Infinity;
+  let startPose = null;
+  let prevEndVehicleHeading = null;
 
-  let minRadius = Infinity;
-  let totalLength = 0;
-  for (let i = 0; i < sampledPts.length - 1; i++) {
-    const s0 = sampledPts[i];
-    const s1 = sampledPts[i + 1];
-    totalLength += Math.hypot(s1.x - s0.x, s1.y - s0.y);
-    if (s0.radius < minRadius) minRadius = s0.radius;
+  for (let c = 0; c < chains.length; c++) {
+    const chain = chains[c];
+    const dir = chain.direction;
+    const sampleOpts = { ...options };
+    if (c > 0 && Number.isFinite(prevEndVehicleHeading)) {
+      sampleOpts.initialTangentRad = dir >= 0 ? prevEndVehicleHeading : normalizeAngle(prevEndVehicleHeading + Math.PI);
+    }
+
+    const sampledPts = sampleCatmullRomSpline(chain.points, sampleOpts);
+    if (!sampledPts || sampledPts.length < 2) continue;
+
+    if (c === 0) {
+      const p0 = sampledPts[0];
+      const p1 = sampledPts[1];
+      const baseHeading = p0.headingRad !== undefined ? p0.headingRad : Math.atan2(p1.y - p0.y, p1.x - p0.x);
+      const startHeadingRad = dir >= 0 ? baseHeading : normalizeAngle(baseHeading + Math.PI);
+      const headingDeg = ((startHeadingRad * 180) / Math.PI + 360) % 360;
+
+      let startX = p0.x;
+      let startY = p0.y;
+      if (steeringRef === "front_axle") {
+        startX = p0.x - Lwb * Math.cos(startHeadingRad);
+        startY = p0.y - Lwb * Math.sin(startHeadingRad);
+      }
+      startPose = { x: Number(startX.toFixed(4)), y: Number(startY.toFixed(4)), headingDeg };
+    }
+
+    let minRadius = Infinity;
+    let totalLength = 0;
+    for (let i = 0; i < sampledPts.length - 1; i++) {
+      const s0 = sampledPts[i];
+      const s1 = sampledPts[i + 1];
+      totalLength += Math.hypot(s1.x - s0.x, s1.y - s0.y);
+      if (s0.radius < minRadius) minRadius = s0.radius;
+    }
+    const lastSample = sampledPts[sampledPts.length - 1];
+    if (lastSample.radius < minRadius) minRadius = lastSample.radius;
+    if (minRadius < globalMinRadius) globalMinRadius = minRadius;
+
+    prevEndVehicleHeading = dir >= 0 ? lastSample.headingRad : normalizeAngle(lastSample.headingRad + Math.PI);
+    for (const sp of sampledPts) allSamples.push(sp);
+
+    segments.push({
+      type: "spline",
+      direction: dir,
+      waypoints: chain.points,
+      samples: sampledPts,
+      length: Number(totalLength.toFixed(3)),
+      minRadius: Number(minRadius.toFixed(2)),
+      steeringReferencePoint: steeringRef
+    });
   }
-  const lastSample = sampledPts[sampledPts.length - 1];
-  if (lastSample.radius < minRadius) minRadius = lastSample.radius;
 
   return {
-    startPose: { x: Number(startX.toFixed(4)), y: Number(startY.toFixed(4)), headingDeg },
-    segments: [
-      {
-        type: "spline",
-        direction,
-        waypoints,
-        samples: sampledPts,
-        length: Number(totalLength.toFixed(3)),
-        minRadius: Number(minRadius.toFixed(2)),
-        steeringReferencePoint: steeringRef
-      }
-    ],
-    splineSamples: sampledPts,
-    minRadius: Number(minRadius.toFixed(2))
+    startPose: startPose || { x: 0, y: 0, headingDeg: 0 },
+    segments,
+    splineSamples: allSamples,
+    minRadius: Number(globalMinRadius.toFixed(2))
   };
 }
 
@@ -583,30 +743,10 @@ export function buildSegmentsFromSplineWaypoints(waypoints, direction = 1, optio
  * @param {number} direction Sentido de marcha (+1 avance, -1 marcha atrás)
  * @param {object} options Opciones adicionales { mode: "spline"|"fillet", stepM: number }
  */
-export function buildSegmentsFromWaypoints(waypoints, defaultRadius = 12.5, direction = 1, options = {}) {
-  if (options && options.mode === "spline") {
-    return buildSegmentsFromSplineWaypoints(waypoints, direction, options);
-  }
-
-  if (!waypoints || waypoints.length === 0) {
+function _buildSingleFilletChain(pts, defaultRadius, direction) {
+  if (!pts || pts.length === 0) {
     return { startPose: { x: 0, y: 0, headingDeg: 0 }, segments: [] };
   }
-
-  const pts = waypoints.map((p) => {
-    const px = Array.isArray(p) ? p[0] : (p?.x !== undefined ? p.x : p?.[0]);
-    const py = Array.isArray(p) ? p[1] : (p?.y !== undefined ? p.y : p?.[1]);
-    const r = (p && p.radius !== undefined) ? p.radius : defaultRadius;
-    return {
-      x: Number(px),
-      y: Number(py),
-      radius: Number(r)
-    };
-  }).filter((p) => Number.isFinite(p.x) && Number.isFinite(p.y));
-
-  if (pts.length === 0) {
-    return { startPose: { x: 0, y: 0, headingDeg: 0 }, segments: [] };
-  }
-
   if (pts.length === 1) {
     return {
       startPose: { x: pts[0].x, y: pts[0].y, headingDeg: 0 },
@@ -710,6 +850,33 @@ export function buildSegmentsFromWaypoints(waypoints, defaultRadius = 12.5, dire
       headingDeg
     },
     segments
+  };
+}
+
+export function buildSegmentsFromWaypoints(waypoints, defaultRadius = 12.5, direction = 1, options = {}) {
+  if (options && options.mode === "spline") {
+    return buildSegmentsFromSplineWaypoints(waypoints, direction, options);
+  }
+
+  const chains = splitWaypointsByDirection(waypoints, direction, { ...options, defaultRadius });
+  if (chains.length === 0) {
+    return { startPose: { x: 0, y: 0, headingDeg: 0 }, segments: [] };
+  }
+
+  const firstRes = _buildSingleFilletChain(chains[0].points, defaultRadius, chains[0].direction);
+  if (chains.length === 1) {
+    return firstRes;
+  }
+
+  const allSegments = [...firstRes.segments];
+  for (let c = 1; c < chains.length; c++) {
+    const subRes = _buildSingleFilletChain(chains[c].points, defaultRadius, chains[c].direction);
+    allSegments.push(...subRes.segments);
+  }
+
+  return {
+    startPose: firstRes.startPose,
+    segments: allSegments
   };
 }
 
@@ -1093,6 +1260,7 @@ export function simulateManeuver(vehicle, maneuver, options = {}) {
 
           if (segRefPoint === "front_axle") {
             // El eje director delantero recorre con exactitud milimétrica la spline trazada
+            // tanto en avance (dir = +1) como en marcha atrás (dir = -1)
             const targetFx = s1.x;
             const targetFy = s1.y;
             const currentFx = x + Lwb * Math.cos(heading);
@@ -1101,8 +1269,9 @@ export function simulateManeuver(vehicle, maneuver, options = {}) {
             const dfy = targetFy - currentFy;
             const psi = Math.atan2(dfy, dfx);
 
-            let dHeading = (stepAbs / Lwb) * Math.sin(psi - heading) * dir;
-            steerAngleRad = normalizeAngle(psi - heading);
+            const motionTargetHeading = dir >= 0 ? psi : normalizeAngle(psi + Math.PI);
+            steerAngleRad = normalizeAngle(motionTargetHeading - heading);
+            const dHeading = (ds / Lwb) * Math.sin(steerAngleRad);
 
             heading = normalizeAngle(heading + dHeading);
             x = targetFx - Lwb * Math.cos(heading);

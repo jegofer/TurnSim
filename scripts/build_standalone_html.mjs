@@ -431,10 +431,14 @@ ${cssContent}
                 <details style="margin-top:8px;background:rgba(11,17,32,0.6);padding:6px 8px;border-radius:5px;border:1px solid #334155;">
                   <summary style="cursor:pointer;font-size:11.5px;font-weight:600;color:#38bdf8;">Generar por puntos de paso (Waypoints X, Y)</summary>
                   <div style="margin-top:6px;">
-                    <label class="form-label" for="inp-waypoints-text">Lista de coordenadas X, Y (una por línea)</label>
+                    <label class="form-label" for="inp-waypoints-text">Lista de coordenadas X, Y [D|R] (una por línea)</label>
                     <textarea id="inp-waypoints-text" rows="3" style="width:100%;background:#0b1120;color:#f8fafc;border:1px solid #334155;border-radius:4px;font-family:monospace;font-size:11px;padding:5px;">0, 0
 20, 0
 20, 20</textarea>
+                    <div style="margin-top:5px;display:flex;align-items:center;gap:6px;font-size:11px;color:#cbd5e1;">
+                      <input type="checkbox" id="chk-auto-cusps" checked style="width:auto;margin:0;" />
+                      <label for="chk-auto-cusps" style="margin:0;cursor:pointer;" data-i18n="lbl_auto_cusps">Detectar cúspides marcha atrás automáticamente (&gt; 125°)</label>
+                    </div>
                     <div class="form-row-3" style="margin-top:5px;">
                       <div>
                         <label class="form-label" for="sel-waypoints-mode">Método trazado</label>
@@ -620,6 +624,7 @@ ${cssContent}
             <div class="pane-badge">PLANTA TÉCNICA 2D (MÉTRICA CAD/GIS)</div>
             <div class="pane-toolbar">
               <button type="button" id="btn-draw-waypoints" class="btn btn-sm btn-outline" style="background:rgba(15,23,42,0.85);color:#38bdf8;border-color:#0284c7;font-weight:600;" title="Activar trazado / edición interactiva de ruta por puntos de paso (clic en plano para añadir o mover waypoints)">✏️ Trazar ruta</button>
+              <button type="button" id="btn-toggle-draw-dir" class="btn btn-sm btn-outline" style="display:none;background:rgba(15,23,42,0.85);color:#38bdf8;border-color:#0284c7;font-weight:600;" title="Alternar sentido de trazado desde el último vértice (Atajo: tecla R)">▶ Avance (D)</button>
               <button type="button" id="btn-toggle-spline-mode" class="btn btn-sm btn-outline" style="background:rgba(15,23,42,0.85);font-size:11px;color:#38bdf8;border-color:#0284c7;" title="Alternar entre Spline CAD continua (sin quiebros en vértices) y Polilínea tradicional con acuerdos fijos">⚡ Spline CAD</button>
               <button type="button" id="btn-clear-path" class="btn btn-sm btn-outline" style="background:rgba(15,23,42,0.85);color:#f87171;border-color:#ef4444;" title="Borrar el trazado del vehículo y reiniciar la maniobra para empezar de nuevo" data-i18n="btn_clear_path">🗑️ Borrar trazado</button>
               <button type="button" id="btn-measure-tool" class="btn btn-sm btn-outline" style="background:rgba(15,23,42,0.85);" title="Activar herramienta para medir distancias métricas en planta (clic en P1 y clic en P2, con snap automático)">📏 Medir distancia</button>
@@ -636,6 +641,7 @@ ${cssContent}
               <button type="button" id="btn-fit-2d" class="btn btn-sm btn-outline" style="background:rgba(15,23,42,0.85);">⊡ Encuadrar 2D</button>
             </div>
             <canvas id="canvas-2d"></canvas>
+            <div id="wp-context-menu" class="wp-context-menu" style="display:none;"></div>
           </div>
 
           <!-- Panel 3D (Three.js complementario) -->

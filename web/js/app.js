@@ -178,7 +178,8 @@ export class SweptPathApp {
           .map((p) => {
             const px = Array.isArray(p) ? p[0] : (p?.x ?? 0);
             const py = Array.isArray(p) ? p[1] : (p?.y ?? 0);
-            return `${Number(px).toFixed(2)} ${Number(py).toFixed(2)}`;
+            const pDir = !Array.isArray(p) && p?.direction === -1 ? " R" : "";
+            return `${Number(px).toFixed(2)} ${Number(py).toFixed(2)}${pDir}`;
           })
           .join("\n");
       }
@@ -202,7 +203,7 @@ export class SweptPathApp {
       const filletR = parseFloat(document.getElementById("inp-waypoints-radius")?.value) || 12.5;
       const dir = parseInt(document.getElementById("sel-waypoints-dir")?.value, 10) || 1;
       const mode = document.getElementById("sel-waypoints-mode")?.value || this.trajectoryMode || "spline";
-      const built = buildSegmentsFromWaypoints(pts, filletR, dir, { mode, vehicle: this.vehicle });
+      const built = buildSegmentsFromWaypoints(pts, filletR, dir, { mode, vehicle: this.vehicle, autoDetectCusps: false });
       this.maneuver.startPose = {
         ...this.maneuver.startPose,
         ...built.startPose
@@ -217,6 +218,19 @@ export class SweptPathApp {
       } else {
         this.scheduleRecompute(24, false, true);
       }
+    };
+
+    this.viewer2D.onWaypointContextMenu = (info) => {
+      this._showWaypointContextMenu(info);
+    };
+
+    this.viewer2D.onActiveDrawDirectionChange = (dir) => {
+      this._updateDrawDirectionButtonUI(dir);
+    };
+
+    this.viewer2D.onAutoCuspDetected = (wpIndex, newDir) => {
+      const label = newDir === -1 ? "Marcha atrás (◀ R)" : "Avance (▶ D)";
+      this.showToast(`Cúspide detectada en P${wpIndex + 1}: cambio automático a ${label}`, "info", 2600);
     };
 
     this._initUI();
@@ -359,6 +373,7 @@ export class SweptPathApp {
       timestamp: new Date().toISOString(),
       projectName: document.getElementById("inp-project-name")?.value.trim() || "",
       diligence: this._getDiligenceData(),
+      waypoints: this.viewer2D?.waypoints || [],
       vehicle: this.vehicle,
       selectedVehicleId: this.selectedVehicleId,
       selectedTractorKey: this.selectedTractorKey,
@@ -400,6 +415,9 @@ export class SweptPathApp {
         }
         if (data.diligence && typeof data.diligence === "object") {
           this._setDiligenceData(data.diligence);
+        }
+        if (Array.isArray(data.waypoints) && this.viewer2D) {
+          this.viewer2D.setWaypoints(data.waypoints);
         }
         this.selectedVehicleId = data.selectedVehicleId || "custom";
         this.selectedTractorKey = data.selectedTractorKey || (data.vehicle.tractorKey || "renault_t_480");
@@ -733,10 +751,114 @@ export class SweptPathApp {
     }, 240);
   }
 
+  _updateDrawDirectionButtonUI(dir = this.viewer2D?.activeDrawDirection || 1) {
+    const btnDir = document.getElementById("btn-toggle-draw-dir");
+    if (!btnDir) return;
+    const isRev = dir === -1;
+    btnDir.textContent = isRev
+      ? this.i18n.t("btn_dir_reverse")
+      : this.i18n.t("btn_dir_forward");
+    btnDir.classList.toggle("btn-draw-dir-reverse", isRev);
+  }
+
+  _toggleActiveDrawDirection() {
+    if (!this.viewer2D) return;
+    const nextDir = this.viewer2D.activeDrawDirection === -1 ? 1 : -1;
+    this.viewer2D.setActiveDrawDirection(nextDir);
+    const wps = this.viewer2D.waypoints;
+    // Si ya hay al menos 2 vértices trazados, marcar el último vértice como punto de inversión para los próximos clics
+    if (wps && wps.length >= 2) {
+      const last = wps[wps.length - 1];
+      wps[wps.length - 1] = {
+        x: this.viewer2D._wpX(last),
+        y: this.viewer2D._wpY(last),
+        direction: nextDir,
+        directionExplicit: true
+      };
+      if (typeof this.viewer2D.onWaypointsChange === "function") {
+        this.viewer2D.onWaypointsChange(wps, { isDragging: false });
+      }
+      this.viewer2D.render();
+    }
+  }
+
+  _setWaypointDirectionFrom(index, newDir) {
+    const wps = this.viewer2D?.waypoints;
+    if (!wps || index < 0 || index >= wps.length) return;
+    for (let i = index; i < wps.length; i++) {
+      const curr = wps[i];
+      if (i > index && curr && !Array.isArray(curr) && curr.directionExplicit) {
+        break;
+      }
+      wps[i] = {
+        x: this.viewer2D._wpX(curr),
+        y: this.viewer2D._wpY(curr),
+        direction: newDir,
+        directionExplicit: i === index
+      };
+    }
+    this.viewer2D.setActiveDrawDirection(wps[wps.length - 1].direction);
+    if (typeof this.viewer2D.onWaypointsChange === "function") {
+      this.viewer2D.onWaypointsChange(wps, { isDragging: false });
+    }
+    this.viewer2D.render();
+  }
+
+  _hideWaypointContextMenu() {
+    const menu = document.getElementById("wp-context-menu");
+    if (menu) menu.style.display = "none";
+  }
+
+  _showWaypointContextMenu({ index, clientX, clientY, waypoint }) {
+    const menu = document.getElementById("wp-context-menu");
+    if (!menu) return;
+    const currDir = this.viewer2D._wpDir(waypoint, 1);
+    const isRev = currDir === -1;
+    menu.innerHTML = `
+      <div class="wp-ctx-header">Vértice P${index + 1} (${this.viewer2D._wpX(waypoint).toFixed(1)}, ${this.viewer2D._wpY(waypoint).toFixed(1)})</div>
+      <button type="button" class="wp-ctx-item ${isRev ? "active-dir" : ""}" data-action="reverse">
+        ${this.i18n.t("ctx_wp_reverse_from")}
+      </button>
+      <button type="button" class="wp-ctx-item ${!isRev ? "active-dir" : ""}" data-action="forward">
+        ${this.i18n.t("ctx_wp_forward_from")}
+      </button>
+      <div class="wp-ctx-sep"></div>
+      <button type="button" class="wp-ctx-item wp-ctx-danger" data-action="delete">
+        ${this.i18n.t("ctx_wp_delete")}
+      </button>
+    `;
+
+    menu.style.display = "block";
+    const mw = menu.offsetWidth || 220;
+    const mh = menu.offsetHeight || 130;
+    const left = Math.min(window.innerWidth - mw - 8, Math.max(8, clientX));
+    const top = Math.min(window.innerHeight - mh - 8, Math.max(8, clientY));
+    menu.style.left = `${left}px`;
+    menu.style.top = `${top}px`;
+
+    menu.querySelector('[data-action="reverse"]')?.addEventListener("click", () => {
+      this._setWaypointDirectionFrom(index, -1);
+      this._hideWaypointContextMenu();
+    });
+    menu.querySelector('[data-action="forward"]')?.addEventListener("click", () => {
+      this._setWaypointDirectionFrom(index, 1);
+      this._hideWaypointContextMenu();
+    });
+    menu.querySelector('[data-action="delete"]')?.addEventListener("click", () => {
+      this.viewer2D.waypoints.splice(index, 1);
+      if (typeof this.viewer2D.onWaypointsChange === "function") {
+        this.viewer2D.onWaypointsChange(this.viewer2D.waypoints, { isDragging: false });
+      }
+      this.viewer2D.render();
+      this._hideWaypointContextMenu();
+    });
+  }
+
   toggleWaypointMode(active) {
     const isActive = this.viewer2D.toggleWaypointMode(active);
     const btn = document.getElementById("btn-draw-waypoints");
     const btnSidebar = document.getElementById("btn-draw-waypoints-sidebar");
+    const btnDir = document.getElementById("btn-toggle-draw-dir");
     if (btn) {
       btn.classList.toggle("active", isActive);
       btn.textContent = isActive ? "✏️ Trazar [Activo]" : "✏️ Trazar ruta";
@@ -745,12 +867,16 @@ export class SweptPathApp {
       btnSidebar.classList.toggle("active", isActive);
       btnSidebar.textContent = isActive ? "✏️ Trazar en plano [Activo]" : "✏️ Trazar / Editar ruta en plano 2D";
     }
+    if (btnDir) {
+      btnDir.style.display = isActive ? "inline-flex" : "none";
+      this._updateDrawDirectionButtonUI();
+    }
     if (isActive) {
       const detailsSections = document.querySelectorAll(".left-sidebar details");
       if (detailsSections[2] && !detailsSections[2].open) {
         detailsSections[2].open = true;
       }
-      this.showToast("Modo trazado activo: Clic en el plano para añadir o arrastrar waypoints", "info", 3200);
+      this.showToast("Modo trazado activo: Clic para añadir · Tecla R o clic dcho. en vértice para marcha atrás", "info", 3500);
     }
     return isActive;
   }
@@ -1015,6 +1141,7 @@ export class SweptPathApp {
       const raw = document.getElementById("inp-waypoints-text").value.trim();
       const filletR = parseFloat(document.getElementById("inp-waypoints-radius").value) || 12.5;
       const dir = parseInt(document.getElementById("sel-waypoints-dir").value, 10) || 1;
+      const autoDetectCusps = Boolean(document.getElementById("chk-auto-cusps")?.checked);
       const pts = [];
       for (const line of raw.split(/\n|;/)) {
         const parts = line.trim().split(/[\s,]+/);
@@ -1022,15 +1149,24 @@ export class SweptPathApp {
           const x = parseFloat(parts[0]);
           const y = parseFloat(parts[1]);
           if (Number.isFinite(x) && Number.isFinite(y)) {
-            pts.push([x, y]);
+            const flag = (parts[2] || "").toUpperCase();
+            if (flag === "R") {
+              pts.push({ x, y, direction: -1, directionExplicit: true });
+            } else if (flag === "D") {
+              pts.push({ x, y, direction: 1, directionExplicit: true });
+            } else {
+              pts.push([x, y]);
+            }
           }
         }
       }
       if (pts.length === 1) {
+        const p0x = Array.isArray(pts[0]) ? pts[0][0] : pts[0].x;
+        const p0y = Array.isArray(pts[0]) ? pts[0][1] : pts[0].y;
         this.maneuver.startPose = {
           ...this.maneuver.startPose,
-          x: pts[0][0],
-          y: pts[0][1]
+          x: p0x,
+          y: p0y
         };
         this.maneuver.segments = [];
         this.viewer2D.setWaypoints(pts);
@@ -1039,7 +1175,7 @@ export class SweptPathApp {
         this.recomputeAll(true);
       } else if (pts.length >= 2) {
         const mode = document.getElementById("sel-waypoints-mode")?.value || this.trajectoryMode || "spline";
-        const built = buildSegmentsFromWaypoints(pts, filletR, dir, { mode, vehicle: this.vehicle });
+        const built = buildSegmentsFromWaypoints(pts, filletR, dir, { mode, vehicle: this.vehicle, autoDetectCusps });
         this.maneuver.startPose = {
           ...this.maneuver.startPose,
           ...built.startPose
@@ -1049,6 +1185,44 @@ export class SweptPathApp {
         this._populateManeuverInputs();
         this._renderSegmentsListUI();
         this.recomputeAll(true);
+      }
+    });
+
+    const btnToggleDrawDir = document.getElementById("btn-toggle-draw-dir");
+    if (btnToggleDrawDir) {
+      btnToggleDrawDir.addEventListener("click", () => {
+        this._toggleActiveDrawDirection();
+      });
+    }
+
+    const chkAutoCusps = document.getElementById("chk-auto-cusps");
+    if (chkAutoCusps) {
+      chkAutoCusps.addEventListener("change", () => {
+        if (this.viewer2D) {
+          this.viewer2D.autoDetectCusps = chkAutoCusps.checked;
+        }
+      });
+    }
+
+    document.addEventListener("click", (e) => {
+      const menu = document.getElementById("wp-context-menu");
+      if (menu && menu.style.display !== "none" && !menu.contains(e.target)) {
+        this._hideWaypointContextMenu();
+      }
+    });
+
+    window.addEventListener("keydown", (e) => {
+      if (e.key === "Escape") {
+        this._hideWaypointContextMenu();
+      } else if ((e.key === "r" || e.key === "R") && !e.ctrlKey && !e.metaKey && !e.altKey) {
+        const tag = (document.activeElement?.tagName || "").toUpperCase();
+        if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT") return;
+        if (this.viewer2D?.waypointMode) {
+          e.preventDefault();
+          this._toggleActiveDrawDirection();
+          const label = this.viewer2D.activeDrawDirection === -1 ? "◀ Retroceso (R)" : "▶ Avance (D)";
+          this.showToast(`Sentido de trazado: ${label}`, "info", 1800);
+        }
       }
     });
 

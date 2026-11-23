@@ -4,7 +4,7 @@
  */
 
 import { getObstacleVertices } from "../engine/collisions.js";
-import { sampleCatmullRomSpline } from "../engine/kinematics.js";
+import { sampleCatmullRomSpline, splitWaypointsByDirection } from "../engine/kinematics.js";
 
 /**
  * Conversión de coordenadas UTM (ETRS89 / WGS84) a coordenadas geográficas (Latitud, Longitud en grados decimales).
@@ -116,6 +116,8 @@ export class Viewer2D {
     // Modo interactivo de edición de trayectoria por waypoints (UX-04)
     this.waypointMode = false;
     this.trajectoryMode = "spline"; // 'spline' (Spline CAD continua) | 'fillet' (Polilínea con acuerdos)
+    this.activeDrawDirection = 1; // +1 avance, -1 marcha atrás
+    this.autoDetectCusps = true; // Detección automática de cúspides > 125° (Opción C)
     this.minVehicleTurnRadius = 6.8;
     this.waypoints = [];
     this.draggedWaypointIndex = -1;
@@ -123,6 +125,9 @@ export class Viewer2D {
     this.onWaypointsChange = null;
     this.onWaypointDragEnd = null;
     this.onWaypointModeChange = null;
+    this.onWaypointContextMenu = null;
+    this.onActiveDrawDirectionChange = null;
+    this.onAutoCuspDetected = null;
 
     // Herramienta de medición de distancias
     this.measureMode = false;
@@ -153,17 +158,17 @@ export class Viewer2D {
 
     this.canvas.addEventListener("contextmenu", (e) => {
       e.preventDefault();
-      if (this.waypointMode && this.hoverWorld) {
-        const [wx, wy] = this.hoverWorld;
-        const hitIdx = this._findWaypointAt(wx, wy);
-        if (hitIdx >= 0) {
-          this.waypoints.splice(hitIdx, 1);
-          if (typeof this.onWaypointsChange === "function") {
-            this.onWaypointsChange(this.waypoints);
-          }
-          this.render();
-          return;
-        }
+      const rect = this.canvas.getBoundingClientRect();
+      const [wx, wy] = this.screenToWorld(e.clientX - rect.left, e.clientY - rect.top);
+      const hitIdx = this._findWaypointAt(wx, wy);
+      if (hitIdx >= 0 && typeof this.onWaypointContextMenu === "function") {
+        this.onWaypointContextMenu({
+          index: hitIdx,
+          clientX: e.clientX,
+          clientY: e.clientY,
+          waypoint: this.waypoints[hitIdx]
+        });
+        return;
       }
       if (this.measureMode || this.measurePoints.length > 0) {
         this.clearMeasurement();
@@ -229,12 +234,49 @@ export class Viewer2D {
         }
 
         const segIdx = this._findWaypointSegmentAt(wx, wy);
-        const newPt = [Number(wx.toFixed(2)), Number(wy.toFixed(2))];
+        const xFixed = Number(wx.toFixed(2));
+        const yFixed = Number(wy.toFixed(2));
         if (segIdx >= 0) {
-          this.waypoints.splice(segIdx + 1, 0, newPt);
+          const prevDir = this._wpDir(this.waypoints[segIdx], this.activeDrawDirection);
+          this.waypoints.splice(segIdx + 1, 0, { x: xFixed, y: yFixed, direction: prevDir, directionExplicit: false });
           this.draggedWaypointIndex = segIdx + 1;
         } else {
-          this.waypoints.push(newPt);
+          // Detección automática de cúspides (Opción C): ángulo de quiebro >= 125° respecto al tramo previo
+          if (this.autoDetectCusps && this.waypoints.length >= 2) {
+            const pPrev = this.waypoints[this.waypoints.length - 2];
+            const pCurr = this.waypoints[this.waypoints.length - 1];
+            const v1x = this._wpX(pCurr) - this._wpX(pPrev);
+            const v1y = this._wpY(pCurr) - this._wpY(pPrev);
+            const v2x = xFixed - this._wpX(pCurr);
+            const v2y = yFixed - this._wpY(pCurr);
+            const len1 = Math.hypot(v1x, v1y);
+            const len2 = Math.hypot(v2x, v2y);
+            if (len1 > 0.5 && len2 > 0.5) {
+              const dot = (v1x * v2x + v1y * v2y) / (len1 * len2);
+              const turnAngle = Math.acos(Math.max(-1, Math.min(1, dot)));
+              const isExplicit = Boolean(pCurr && !Array.isArray(pCurr) && pCurr.directionExplicit);
+              if (turnAngle >= (125 * Math.PI) / 180 && !isExplicit) {
+                const currDir = this._wpDir(pCurr, this.activeDrawDirection);
+                const flippedDir = currDir === 1 ? -1 : 1;
+                this.waypoints[this.waypoints.length - 1] = {
+                  x: this._wpX(pCurr),
+                  y: this._wpY(pCurr),
+                  direction: flippedDir,
+                  directionExplicit: false
+                };
+                this.setActiveDrawDirection(flippedDir);
+                if (typeof this.onAutoCuspDetected === "function") {
+                  this.onAutoCuspDetected(this.waypoints.length - 1, flippedDir);
+                }
+              }
+            }
+          }
+          this.waypoints.push({
+            x: xFixed,
+            y: yFixed,
+            direction: this.activeDrawDirection,
+            directionExplicit: false
+          });
           this.draggedWaypointIndex = this.waypoints.length - 1;
         }
         if (typeof this.onWaypointsChange === "function") {
@@ -284,7 +326,14 @@ export class Viewer2D {
       const [wx, wy] = this.hoverWorld;
 
       if (this.draggedWaypointIndex >= 0 && this.waypoints[this.draggedWaypointIndex]) {
-        this.waypoints[this.draggedWaypointIndex] = [Number(wx.toFixed(2)), Number(wy.toFixed(2))];
+        const oldWp = this.waypoints[this.draggedWaypointIndex];
+        const xFixed = Number(wx.toFixed(2));
+        const yFixed = Number(wy.toFixed(2));
+        if (oldWp && !Array.isArray(oldWp)) {
+          this.waypoints[this.draggedWaypointIndex] = { ...oldWp, x: xFixed, y: yFixed };
+        } else {
+          this.waypoints[this.draggedWaypointIndex] = { x: xFixed, y: yFixed, direction: this.activeDrawDirection, directionExplicit: false };
+        }
         if (typeof this.onWaypointsChange === "function") {
           this.onWaypointsChange(this.waypoints, { isDragging: true });
         }
@@ -415,16 +464,47 @@ export class Viewer2D {
     }
   }
 
+  _wpX(wp) {
+    return Array.isArray(wp) ? wp[0] : (wp?.x !== undefined ? wp.x : wp?.[0] ?? 0);
+  }
+
+  _wpY(wp) {
+    return Array.isArray(wp) ? wp[1] : (wp?.y !== undefined ? wp.y : wp?.[1] ?? 0);
+  }
+
+  _wpDir(wp, fallback = 1) {
+    if (wp && !Array.isArray(wp) && (wp.direction === 1 || wp.direction === -1)) {
+      return wp.direction;
+    }
+    return fallback;
+  }
+
+  setActiveDrawDirection(dir) {
+    const nextDir = dir === -1 ? -1 : 1;
+    this.activeDrawDirection = nextDir;
+    if (typeof this.onActiveDrawDirectionChange === "function") {
+      this.onActiveDrawDirectionChange(nextDir);
+    }
+    this.render();
+  }
+
   setWaypoints(pts) {
     this.waypoints = Array.isArray(pts)
       ? pts
           .map((p) => {
-            const px = Array.isArray(p) ? p[0] : (p?.x !== undefined ? p.x : p?.[0]);
-            const py = Array.isArray(p) ? p[1] : (p?.y !== undefined ? p.y : p?.[1]);
-            return [Number(px), Number(py)];
+            const px = Number(this._wpX(p));
+            const py = Number(this._wpY(p));
+            if (p && !Array.isArray(p) && (p.direction === 1 || p.direction === -1)) {
+              return { x: px, y: py, direction: p.direction, directionExplicit: Boolean(p.directionExplicit) };
+            }
+            return { x: px, y: py, direction: 1, directionExplicit: false };
           })
-          .filter((p) => Number.isFinite(p[0]) && Number.isFinite(p[1]))
+          .filter((p) => Number.isFinite(p.x) && Number.isFinite(p.y))
       : [];
+    if (this.waypoints.length > 0) {
+      const lastDir = this._wpDir(this.waypoints[this.waypoints.length - 1], 1);
+      this.activeDrawDirection = lastDir;
+    }
     this.render();
   }
 
@@ -432,6 +512,10 @@ export class Viewer2D {
     this.waypoints = [];
     this.draggedWaypointIndex = -1;
     this.hoveredWaypointIndex = -1;
+    this.activeDrawDirection = 1;
+    if (typeof this.onActiveDrawDirectionChange === "function") {
+      this.onActiveDrawDirectionChange(1);
+    }
     if (!silent && typeof this.onWaypointsChange === "function") {
       this.onWaypointsChange(this.waypoints);
     }
@@ -443,7 +527,7 @@ export class Viewer2D {
     const tolM = tolPx / this.scale;
     for (let i = 0; i < this.waypoints.length; i++) {
       const wp = this.waypoints[i];
-      if (Math.hypot(wp[0] - wx, wp[1] - wy) <= tolM) {
+      if (Math.hypot(this._wpX(wp) - wx, this._wpY(wp) - wy) <= tolM) {
         return i;
       }
     }
@@ -454,15 +538,17 @@ export class Viewer2D {
     if (!this.waypoints || this.waypoints.length < 2) return -1;
     const tolM = tolPx / this.scale;
     for (let i = 0; i < this.waypoints.length - 1; i++) {
-      const p1 = this.waypoints[i];
-      const p2 = this.waypoints[i + 1];
-      const dx = p2[0] - p1[0];
-      const dy = p2[1] - p1[1];
+      const p1x = this._wpX(this.waypoints[i]);
+      const p1y = this._wpY(this.waypoints[i]);
+      const p2x = this._wpX(this.waypoints[i + 1]);
+      const p2y = this._wpY(this.waypoints[i + 1]);
+      const dx = p2x - p1x;
+      const dy = p2y - p1y;
       const l2 = dx * dx + dy * dy;
       if (l2 === 0) continue;
-      let t = ((wx - p1[0]) * dx + (wy - p1[1]) * dy) / l2;
+      let t = ((wx - p1x) * dx + (wy - p1y) * dy) / l2;
       t = Math.max(0, Math.min(1, t));
-      const dist = Math.hypot(wx - (p1[0] + t * dx), wy - (p1[1] + t * dy));
+      const dist = Math.hypot(wx - (p1x + t * dx), wy - (p1y + t * dy));
       if (dist <= tolM) {
         return i;
       }
@@ -1568,55 +1654,96 @@ export class Viewer2D {
     let hasSharpCurvature = false;
     let minObservedR = Infinity;
 
-    // 1. Línea directriz entre waypoints (Spline CAD continua o Polilínea clásica)
+    // 1. Línea directriz entre waypoints dividida por sub-tramos de sentido (Avance vs Retroceso)
+    const chains = splitWaypointsByDirection(this.waypoints, this._wpDir(this.waypoints[0], 1), {
+      autoDetectCusps: false
+    });
+    const cuspDirs = new Map();
+    for (let c = 1; c < chains.length; c++) {
+      const firstPt = chains[c].points[0];
+      const idx = this.waypoints.findIndex(
+        (w) => Math.hypot(this._wpX(w) - firstPt.x, this._wpY(w) - firstPt.y) < 1e-4
+      );
+      if (idx >= 0) cuspDirs.set(idx, chains[c].direction);
+    }
+
     if (this.waypoints.length >= 2) {
-      if (this.trajectoryMode === "spline" && this.waypoints.length >= 3) {
+      if (this.trajectoryMode === "spline") {
         // Polígono de control CAD (líneas tenues discontinuas)
-        ctx.strokeStyle = "rgba(148, 163, 184, 0.35)";
-        ctx.lineWidth = 1.0;
-        ctx.setLineDash([4, 4]);
-        ctx.beginPath();
-        for (let i = 0; i < this.waypoints.length; i++) {
-          const [sx, sy] = this.worldToScreen(this.waypoints[i][0], this.waypoints[i][1]);
-          if (i === 0) ctx.moveTo(sx, sy);
-          else ctx.lineTo(sx, sy);
-        }
-        ctx.stroke();
-        ctx.setLineDash([]);
-
-        // Traza Spline Catmull-Rom continua con evaluación de radio admisible
-        const splineSamples = sampleCatmullRomSpline(this.waypoints, { stepM: 0.20 });
-        const minTurnR = this.minVehicleTurnRadius || 6.8;
-
-        for (let i = 0; i < splineSamples.length - 1; i++) {
-          const s0 = splineSamples[i];
-          const s1 = splineSamples[i + 1];
-          if (s0.radius < minObservedR) minObservedR = s0.radius;
-          const isSharp = s0.radius < minTurnR || s1.radius < minTurnR;
-          if (isSharp) hasSharpCurvature = true;
-
-          const [sx0, sy0] = this.worldToScreen(s0.x, s0.y);
-          const [sx1, sy1] = this.worldToScreen(s1.x, s1.y);
-
-          ctx.strokeStyle = isSharp ? "#f87171" : (this.waypointMode ? "#38bdf8" : "rgba(56, 189, 248, 0.70)");
-          ctx.lineWidth = isSharp ? 2.8 : (this.waypointMode ? 2.4 : 1.8);
+        if (this.waypoints.length >= 3) {
+          ctx.strokeStyle = "rgba(148, 163, 184, 0.35)";
+          ctx.lineWidth = 1.0;
+          ctx.setLineDash([4, 4]);
           ctx.beginPath();
-          ctx.moveTo(sx0, sy0);
-          ctx.lineTo(sx1, sy1);
+          for (let i = 0; i < this.waypoints.length; i++) {
+            const [sx, sy] = this.worldToScreen(this._wpX(this.waypoints[i]), this._wpY(this.waypoints[i]));
+            if (i === 0) ctx.moveTo(sx, sy);
+            else ctx.lineTo(sx, sy);
+          }
           ctx.stroke();
+          ctx.setLineDash([]);
+        }
+
+        const minTurnR = this.minVehicleTurnRadius || 6.8;
+        let prevEndHeading = null;
+        for (let c = 0; c < chains.length; c++) {
+          const ch = chains[c];
+          const sOpts = { stepM: 0.20 };
+          if (c > 0 && Number.isFinite(prevEndHeading)) {
+            sOpts.initialTangentRad = ch.direction >= 0 ? prevEndHeading : prevEndHeading + Math.PI;
+          }
+          const splineSamples = sampleCatmullRomSpline(ch.points, sOpts);
+          const isReverse = ch.direction === -1;
+
+          if (isReverse) ctx.setLineDash([7, 5]);
+          else ctx.setLineDash([]);
+
+          for (let i = 0; i < splineSamples.length - 1; i++) {
+            const s0 = splineSamples[i];
+            const s1 = splineSamples[i + 1];
+            if (s0.radius < minObservedR) minObservedR = s0.radius;
+            const isSharp = s0.radius < minTurnR || s1.radius < minTurnR;
+            if (isSharp) hasSharpCurvature = true;
+
+            const [sx0, sy0] = this.worldToScreen(s0.x, s0.y);
+            const [sx1, sy1] = this.worldToScreen(s1.x, s1.y);
+
+            if (isSharp) {
+              ctx.strokeStyle = "#f87171";
+            } else if (isReverse) {
+              ctx.strokeStyle = this.waypointMode ? "#f59e0b" : "rgba(245, 158, 11, 0.80)";
+            } else {
+              ctx.strokeStyle = this.waypointMode ? "#38bdf8" : "rgba(56, 189, 248, 0.70)";
+            }
+            ctx.lineWidth = isSharp ? 2.8 : (this.waypointMode ? 2.4 : 1.8);
+            ctx.beginPath();
+            ctx.moveTo(sx0, sy0);
+            ctx.lineTo(sx1, sy1);
+            ctx.stroke();
+          }
+          ctx.setLineDash([]);
+          if (splineSamples.length >= 2) {
+            const lastSp = splineSamples[splineSamples.length - 1];
+            prevEndHeading = ch.direction >= 0 ? lastSp.headingRad : lastSp.headingRad + Math.PI;
+          }
         }
       } else {
-        // Modo tradicional polilínea con acuerdos
-        ctx.strokeStyle = this.waypointMode ? "#38bdf8" : "rgba(56, 189, 248, 0.45)";
-        ctx.lineWidth = this.waypointMode ? 2.2 : 1.5;
-        ctx.setLineDash([6, 4]);
-        ctx.beginPath();
-        for (let i = 0; i < this.waypoints.length; i++) {
-          const [sx, sy] = this.worldToScreen(this.waypoints[i][0], this.waypoints[i][1]);
-          if (i === 0) ctx.moveTo(sx, sy);
-          else ctx.lineTo(sx, sy);
+        // Modo tradicional polilínea con acuerdos diferenciando tramos en avance y retroceso
+        for (const ch of chains) {
+          const isReverse = ch.direction === -1;
+          ctx.strokeStyle = isReverse
+            ? (this.waypointMode ? "#f59e0b" : "rgba(245, 158, 11, 0.65)")
+            : (this.waypointMode ? "#38bdf8" : "rgba(56, 189, 248, 0.45)");
+          ctx.lineWidth = this.waypointMode ? 2.2 : 1.5;
+          ctx.setLineDash(isReverse ? [7, 4] : [6, 4]);
+          ctx.beginPath();
+          for (let i = 0; i < ch.points.length; i++) {
+            const [sx, sy] = this.worldToScreen(ch.points[i].x, ch.points[i].y);
+            if (i === 0) ctx.moveTo(sx, sy);
+            else ctx.lineTo(sx, sy);
+          }
+          ctx.stroke();
         }
-        ctx.stroke();
         ctx.setLineDash([]);
       }
     }
@@ -1624,23 +1751,34 @@ export class Viewer2D {
     // 2. Nodos circulares
     for (let i = 0; i < this.waypoints.length; i++) {
       const wp = this.waypoints[i];
-      const [sx, sy] = this.worldToScreen(wp[0], wp[1]);
+      const wx = this._wpX(wp);
+      const wy = this._wpY(wp);
+      const [sx, sy] = this.worldToScreen(wx, wy);
       const isDragged = this.draggedWaypointIndex === i;
       const isHovered = this.hoveredWaypointIndex === i;
+      const cuspDir = cuspDirs.get(i);
+      const isCusp = cuspDir !== undefined;
+      const wpDir = this._wpDir(wp, 1);
       const r = isDragged ? 11 : isHovered ? 10 : 8.5;
 
-      // Halo resaltado si está interactivo
-      if (isDragged || isHovered) {
-        ctx.fillStyle = isDragged ? "rgba(245, 158, 11, 0.35)" : "rgba(56, 189, 248, 0.35)";
+      // Halo resaltado si está interactivo o si es vértice de inversión de marcha
+      if (isDragged || isHovered || isCusp) {
+        ctx.fillStyle = isCusp
+          ? (cuspDir === -1 ? "rgba(245, 158, 11, 0.35)" : "rgba(56, 189, 248, 0.35)")
+          : (isDragged ? "rgba(245, 158, 11, 0.35)" : "rgba(56, 189, 248, 0.35)");
         ctx.beginPath();
         ctx.arc(sx, sy, r + 4, 0, Math.PI * 2);
         ctx.fill();
       }
 
       // Círculo del nodo
-      ctx.fillStyle = isDragged ? "#f59e0b" : isHovered ? "#0284c7" : "#0369a1";
-      ctx.strokeStyle = "#f8fafc";
-      ctx.lineWidth = 2.0;
+      ctx.fillStyle = isDragged
+        ? "#f59e0b"
+        : isCusp
+          ? (cuspDir === -1 ? "#d97706" : "#0284c7")
+          : (wpDir === -1 ? "#b45309" : (isHovered ? "#0284c7" : "#0369a1"));
+      ctx.strokeStyle = isCusp ? "#fde68a" : "#f8fafc";
+      ctx.lineWidth = isCusp ? 2.5 : 2.0;
       ctx.beginPath();
       ctx.arc(sx, sy, r, 0, Math.PI * 2);
       ctx.fill();
@@ -1653,9 +1791,29 @@ export class Viewer2D {
       ctx.textBaseline = "middle";
       ctx.fillText(String(i + 1), sx, sy);
 
+      // Insignia visual en vértice de cambio de marcha
+      if (isCusp) {
+        const badgeText = cuspDir === -1 ? "⇄ R" : "⇄ D";
+        ctx.font = "bold 9.5px 'Segoe UI', system-ui, sans-serif";
+        const bw = ctx.measureText(badgeText).width + 8;
+        const bx = sx + r + 4;
+        const by = sy - 8;
+        ctx.fillStyle = cuspDir === -1 ? "rgba(180, 83, 9, 0.95)" : "rgba(2, 132, 199, 0.95)";
+        ctx.strokeStyle = "#fde68a";
+        ctx.lineWidth = 1;
+        ctx.beginPath();
+        ctx.roundRect(bx, by, bw, 15, 4);
+        ctx.fill();
+        ctx.stroke();
+        ctx.fillStyle = "#ffffff";
+        ctx.textAlign = "center";
+        ctx.textBaseline = "middle";
+        ctx.fillText(badgeText, bx + bw / 2, by + 7.5);
+      }
+
       // Etiqueta métrica flotante únicamente durante arrastre interactivo (modo limpio)
       if (this.waypointMode && isDragged) {
-        const coordText = `P${i + 1} (${wp[0].toFixed(2)}, ${wp[1].toFixed(2)})`;
+        const coordText = `P${i + 1} (${wx.toFixed(2)}, ${wy.toFixed(2)})`;
         ctx.font = "10px monospace";
         const tw = ctx.measureText(coordText).width + 8;
         ctx.fillStyle = "rgba(15, 23, 42, 0.90)";
@@ -1670,22 +1828,23 @@ export class Viewer2D {
 
     // 3. Banner informativo en modo edición (situado en la parte inferior para despejar por completo la botonera superior)
     if (this.waypointMode) {
-      const modeLabel = this.trajectoryMode === "spline" ? "SPLINE CAD CONTINUO" : "POLILÍNEA CAD";
+      const modeLabel = this.trajectoryMode === "spline" ? "SPLINE CAD" : "POLILÍNEA CAD";
+      const dirLabel = this.activeDrawDirection === -1 ? "◀ RETROCESO (R)" : "▶ AVANCE (D)";
       const sharpWarning = hasSharpCurvature ? ` · ⚠️ Radio cerrado (${minObservedR.toFixed(1)} m)` : "";
-      const bannerText = `✏️ MODO TRAZADO [${modeLabel}]: Clic para añadir · Arrastrar para ajustar${sharpWarning} · Clic dcho. para borrar`;
+      const bannerText = `✏️ [${modeLabel} · ${dirLabel}]: Clic añadir · Tecla R: invertir · Clic dcho. vértice: menú${sharpWarning}`;
       ctx.font = "600 11px 'Segoe UI', system-ui, sans-serif";
       const bw = ctx.measureText(bannerText).width + 24;
       const bx = (this.width - bw) / 2;
       const by = Math.max(16, this.height - 42);
       ctx.fillStyle = "rgba(15, 23, 42, 0.92)";
-      ctx.strokeStyle = hasSharpCurvature ? "#f87171" : "#0284c7";
+      ctx.strokeStyle = hasSharpCurvature ? "#f87171" : (this.activeDrawDirection === -1 ? "#f59e0b" : "#0284c7");
       ctx.lineWidth = 1.5;
       ctx.beginPath();
       ctx.roundRect(bx, by, bw, 28, 6);
       ctx.fill();
       ctx.stroke();
 
-      ctx.fillStyle = hasSharpCurvature ? "#fca5a5" : "#38bdf8";
+      ctx.fillStyle = hasSharpCurvature ? "#fca5a5" : (this.activeDrawDirection === -1 ? "#fcd34d" : "#38bdf8");
       ctx.textAlign = "center";
       ctx.textBaseline = "middle";
       ctx.fillText(bannerText, this.width / 2, by + 14);
