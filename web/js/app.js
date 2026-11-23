@@ -940,15 +940,56 @@ export class SweptPathApp {
     const tractorSelect = document.getElementById("select-tractor");
     const trailerSelect = document.getElementById("select-trailer");
 
-    // Llenar tractoras
+    const appendOptGroup = (selectEl, label, items) => {
+      if (!items.length) return;
+      const grp = document.createElement("optgroup");
+      grp.label = label;
+      for (const { value, text } of items) {
+        const opt = document.createElement("option");
+        opt.value = value;
+        opt.textContent = text;
+        grp.appendChild(opt);
+      }
+      selectEl.appendChild(grp);
+    };
+
+    // Llenar tractoras / chasis base organizados por normativa primero y marcas comerciales después
     if (tractorSelect) {
       tractorSelect.innerHTML = "";
-      for (const [key, tr] of Object.entries(TRACTOR_CATALOG)) {
-        const opt = document.createElement("option");
-        opt.value = key;
-        opt.textContent = `${tr.name} (Batalla: ${tr.wheelbase.toFixed(2)}m)`;
-        tractorSelect.appendChild(opt);
+      const tractorGroups = [
+        {
+          label: "📏 Normativa y estándares — Cabezas tractoras",
+          keys: ["spain_tractor_t", "generic_schlepp_tractor"]
+        },
+        {
+          label: "🚛 Marcas comerciales — Cabezas tractoras 4x2",
+          keys: ["renault_t_480", "mercedes_actros_1845", "daf_xf_480", "volvo_fh_500", "scania_r_450"]
+        },
+        {
+          label: "📏 Normativa y estándares — Turismos y furgonetas",
+          keys: ["standard_turismo_p", "standard_furgoneta_l2", "spain_furgon_f"]
+        },
+        {
+          label: "📏 Normativa y estándares — Camiones rígidos y autobuses",
+          keys: ["spain_camion_ligero_c", "spain_autobus_rigido_a", "rigid_truck_2axle", "rigid_truck_3axle", "city_bus_12m", "coach_bus_15m"]
+        }
+      ];
+      const usedTractorKeys = new Set();
+      for (const g of tractorGroups) {
+        const items = [];
+        for (const key of g.keys) {
+          const tr = TRACTOR_CATALOG[key];
+          if (!tr) continue;
+          usedTractorKeys.add(key);
+          items.push({ value: key, text: `${tr.name} (Batalla: ${tr.wheelbase.toFixed(2)} m)` });
+        }
+        appendOptGroup(tractorSelect, g.label, items);
       }
+      const extraTractors = Object.entries(TRACTOR_CATALOG)
+        .filter(([k]) => !usedTractorKeys.has(k))
+        .map(([k, tr]) => ({ value: k, text: `${tr.name} (Batalla: ${tr.wheelbase.toFixed(2)} m)` }));
+      appendOptGroup(tractorSelect, "Otros chasis", extraTractors);
+
       tractorSelect.value = this.selectedTractorKey;
       tractorSelect.addEventListener("change", () => {
         this.selectedTractorKey = tractorSelect.value;
@@ -956,15 +997,40 @@ export class SweptPathApp {
       });
     }
 
-    // Llenar semirremolques
+    // Llenar semirremolques organizados por normativa primero y marcas comerciales después
     if (trailerSelect) {
       trailerSelect.innerHTML = "";
-      for (const [key, tl] of Object.entries(TRAILER_CATALOG)) {
-        const opt = document.createElement("option");
-        opt.value = key;
-        opt.textContent = `${tl.name} (L_t: ${tl.wheelbase.toFixed(2)}m, Ancho: ${tl.width.toFixed(2)}m)`;
-        trailerSelect.appendChild(opt);
+      const trailerGroups = [
+        {
+          label: "📏 Normativa y estándares — Semirremolques",
+          keys: ["spain_semitrailer_t", "generic_cisterna_1150", "generic_schlepp_trailer"]
+        },
+        {
+          label: "🚛 Marcas comerciales — Semirremolques",
+          keys: ["schmitz_sko_cool", "schmitz_scs_universal", "krone_profi_liner"]
+        },
+        {
+          label: "🚫 Sin semirremolque",
+          keys: ["none"]
+        }
+      ];
+      const usedTrailerKeys = new Set();
+      for (const g of trailerGroups) {
+        const items = [];
+        for (const key of g.keys) {
+          const tl = TRAILER_CATALOG[key];
+          if (!tl) continue;
+          usedTrailerKeys.add(key);
+          const desc = key === "none" ? tl.name : `${tl.name} (L_t: ${tl.wheelbase.toFixed(2)} m, Ancho: ${tl.width.toFixed(2)} m)`;
+          items.push({ value: key, text: desc });
+        }
+        appendOptGroup(trailerSelect, g.label, items);
       }
+      const extraTrailers = Object.entries(TRAILER_CATALOG)
+        .filter(([k]) => !usedTrailerKeys.has(k))
+        .map(([k, tl]) => ({ value: k, text: `${tl.name} (L_t: ${tl.wheelbase.toFixed(2)} m, Ancho: ${tl.width.toFixed(2)} m)` }));
+      appendOptGroup(trailerSelect, "Otros semirremolques", extraTrailers);
+
       trailerSelect.value = this.selectedTrailerKey;
       trailerSelect.addEventListener("change", () => {
         this.selectedTrailerKey = trailerSelect.value;
@@ -972,14 +1038,42 @@ export class SweptPathApp {
       });
     }
 
-    // Llenar conjuntos preconfigurados
+    // Llenar conjuntos preconfigurados: primero normativa/estándares por categoría, después marcas comerciales
     vehSelect.innerHTML = "";
-    for (const v of Object.values(VEHICLE_CATALOG)) {
-      const opt = document.createElement("option");
-      opt.value = v.id;
-      opt.textContent = `${v.name}`;
-      vehSelect.appendChild(opt);
+    const vehicleGroups = [
+      {
+        label: "📏 Normativa y estándares — Turismos y furgonetas",
+        keys: ["standard_turismo_p", "standard_furgoneta_l2", "spain_furgon_f"]
+      },
+      {
+        label: "📏 Normativa y estándares — Camiones rígidos y autobuses",
+        keys: ["spain_camion_ligero_c", "spain_autobus_rigido_a", "rigid_truck_2axle", "rigid_truck_3axle", "city_bus_12m", "coach_bus_15m"]
+      },
+      {
+        label: "📏 Normativa y estándares — Articulados, trenes y EMS",
+        keys: ["spain_camion_articulado_t", "road_train_1875", "ems_megatruck_2525", "generic_schlepp_1650"]
+      },
+      {
+        label: "🚛 Marcas comerciales — Conjuntos articulados",
+        keys: ["renault_t_4x2_sko", "mercedes_actros_4x2_scs", "daf_xf_4x2_eu", "volvo_fh_scs", "scania_r_sko"]
+      }
+    ];
+    const usedVehKeys = new Set();
+    for (const g of vehicleGroups) {
+      const items = [];
+      for (const key of g.keys) {
+        const v = VEHICLE_CATALOG[key];
+        if (!v) continue;
+        usedVehKeys.add(key);
+        items.push({ value: v.id, text: v.name });
+      }
+      appendOptGroup(vehSelect, g.label, items);
     }
+    const extraVehicles = Object.values(VEHICLE_CATALOG)
+      .filter((v) => !usedVehKeys.has(v.id))
+      .map((v) => ({ value: v.id, text: v.name }));
+    appendOptGroup(vehSelect, "Otros vehículos", extraVehicles);
+
     const customOpt = document.createElement("option");
     customOpt.value = "custom";
     customOpt.textContent = "⚙️ [Personalizado / Combinación libre]";
@@ -989,6 +1083,15 @@ export class SweptPathApp {
     vehSelect.addEventListener("change", () => {
       const val = vehSelect.value;
       if (val === "custom") {
+        // Si veníamos de un vehículo rígido sin cabeza tractora, restaurar una tractora por defecto para combinar
+        if (TRACTOR_CATALOG[this.selectedTractorKey]?.isRigid) {
+          this.selectedTractorKey = "spain_tractor_t";
+          if (tractorSelect) tractorSelect.value = this.selectedTractorKey;
+        }
+        if (this.selectedTrailerKey === "none") {
+          this.selectedTrailerKey = "spain_semitrailer_t";
+          if (trailerSelect) trailerSelect.value = this.selectedTrailerKey;
+        }
         this.vehicle = buildCombinedVehicle(this.selectedTractorKey, this.selectedTrailerKey);
         this.selectedVehicleId = "custom";
       } else {
@@ -1001,6 +1104,9 @@ export class SweptPathApp {
         if (this.vehicle.trailerKey) {
           this.selectedTrailerKey = this.vehicle.trailerKey;
           if (trailerSelect) trailerSelect.value = this.selectedTrailerKey;
+        } else if (!this.vehicle.hasTrailer || !this.vehicle.trailer) {
+          this.selectedTrailerKey = "none";
+          if (trailerSelect) trailerSelect.value = "none";
         }
       }
       this.isCustomModified = false;
@@ -1939,6 +2045,23 @@ export class SweptPathApp {
   _populateVehicleInputs() {
     const v = this.vehicle;
     const isRigid = !v.hasTrailer || !v.trailer;
+    const isMultiBodyFixed = Array.isArray(v.trailers) && v.trailers.length > 1;
+
+    const tractorSelect = document.getElementById("select-tractor");
+    const trailerSelect = document.getElementById("select-trailer");
+    if (tractorSelect) {
+      tractorSelect.disabled = isRigid || isMultiBodyFixed;
+      tractorSelect.title = tractorSelect.disabled
+        ? "No aplica: el vehículo seleccionado no utiliza una cabeza tractora independiente"
+        : "Seleccionar cabeza tractora";
+    }
+    if (trailerSelect) {
+      trailerSelect.disabled = isRigid || isMultiBodyFixed;
+      if (isRigid) trailerSelect.value = "none";
+      trailerSelect.title = trailerSelect.disabled
+        ? "No aplica: el vehículo seleccionado no dispone de semirremolque independiente"
+        : "Seleccionar semirremolque";
+    }
 
     const trWb = document.getElementById("inp-tr-wb");
     if (trWb) trWb.value = v.tractor.wheelbase;

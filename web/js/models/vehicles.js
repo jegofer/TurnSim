@@ -212,6 +212,50 @@ export const TRACTOR_CATALOG = {
     verified: true,
     source: "Directiva 96/53/CE modificada (Autocar 3 ejes longitud máxima 15,00 m)"
   },
+  standard_turismo_p: {
+    id: "standard_turismo_p",
+    name: "Turismo patrón estándar (P) — Referencia diseño viario",
+    isRigid: true,
+    manufacturer: "Estándar normativo (AASHTO P / FGSV PKW / Diseño viario)",
+    category: "Turismo ligero estándar (4,75 m)",
+    axleConfig: "4x2 (1 directriz + 1 motriz)",
+    wheelbase: 2.850,
+    frontOverhang: 0.920,
+    rearOverhang: 0.980,
+    width: 1.850,
+    trackWidthFront: 1.580,
+    trackWidthRear: 1.580,
+    hitchOffset: 0.0,
+    kerbTurningRadiusDeclared: 5.950,
+    wallTurningRadiusDeclared: 6.450,
+    maxSteerAngleDeg: 34.0,
+    colorCab: 0x0ea5e9,
+    colorStripe: 0x7dd3fc,
+    verified: true,
+    source: "Estándares de diseño geométrico viario (AASHTO Passenger Car P / FGSV Pkw)"
+  },
+  standard_furgoneta_l2: {
+    id: "standard_furgoneta_l2",
+    name: "Furgoneta estándar de reparto (L2) — Referencia diseño viario",
+    isRigid: true,
+    manufacturer: "Estándar comercial europeo (Segmento N1 L2H2)",
+    category: "Furgoneta de reparto estándar (5,93 m)",
+    axleConfig: "4x2 (1 directriz + 1 motriz)",
+    wheelbase: 3.665,
+    frontOverhang: 1.000,
+    rearOverhang: 1.265,
+    width: 2.020,
+    trackWidthFront: 1.720,
+    trackWidthRear: 1.720,
+    hitchOffset: 0.0,
+    kerbTurningRadiusDeclared: 6.800,
+    wallTurningRadiusDeclared: 7.450,
+    maxSteerAngleDeg: 38.0,
+    colorCab: 0x0284c7,
+    colorStripe: 0xbae6fd,
+    verified: true,
+    source: "Especificación geométrica estándar de furgoneta comercial europea L2 (5,93 m)"
+  },
   spain_furgon_f: {
     id: "spain_furgon_f",
     name: "Furgón patrón (F) — Norma 3.1-IC",
@@ -491,15 +535,26 @@ export function buildCombinedVehicle(tractorKey, trailerKey) {
  * Compatible con la suite de pruebas y versiones anteriores.
  */
 export const VEHICLE_CATALOG = {
-  spain_camion_articulado_t: {
-    ...buildCombinedVehicle("spain_tractor_t", "spain_semitrailer_t"),
-    id: "spain_camion_articulado_t",
-    presetKey: "spain_camion_articulado_t",
-    tractorKey: "spain_tractor_t",
-    trailerKey: "spain_semitrailer_t",
-    name: "Camión articulado patrón (T) — Norma 3.1-IC",
-    modelVariant: "Tractora 4x2 (Batalla 3,90 m, h=0,70 m) + Semirremolque trídem 13,60 m (L_total 16,50 m)",
-    category: "Vehículo patrón oficial Norma 3.1-IC (Vehículo articulado T)"
+  // 1. ESTÁNDARES Y NORMATIVA — TURISMOS Y FURGONETAS
+  standard_turismo_p: {
+    ...buildCombinedVehicle("standard_turismo_p", "none"),
+    id: "standard_turismo_p",
+    presetKey: "standard_turismo_p",
+    tractorKey: "standard_turismo_p",
+    trailerKey: "none",
+    name: "Turismo patrón estándar (P) — Referencia diseño viario (4,75 m)",
+    modelVariant: "Turismo ligero estándar (Batalla 2,85 m, longitud total 4,75 m)",
+    category: "Estándar viario — Turismo (AASHTO P / FGSV Pkw)"
+  },
+  standard_furgoneta_l2: {
+    ...buildCombinedVehicle("standard_furgoneta_l2", "none"),
+    id: "standard_furgoneta_l2",
+    presetKey: "standard_furgoneta_l2",
+    tractorKey: "standard_furgoneta_l2",
+    trailerKey: "none",
+    name: "Furgoneta estándar de reparto (L2) — Referencia diseño viario (5,93 m)",
+    modelVariant: "Furgoneta comercial ligera N1 L2 (Batalla 3,665 m, longitud total 5,93 m)",
+    category: "Estándar viario — Furgoneta comercial (5,93 m)"
   },
   spain_furgon_f: {
     ...buildCombinedVehicle("spain_furgon_f", "none"),
@@ -511,6 +566,7 @@ export const VEHICLE_CATALOG = {
     modelVariant: "Furgón ligero 2 ejes (Batalla 4,00 m, longitud total 6,35 m)",
     category: "Vehículo patrón oficial Norma 3.1-IC (Furgón F)"
   },
+  // 2. ESTÁNDARES Y NORMATIVA — CAMIONES RÍGIDOS Y AUTOBUSES
   spain_camion_ligero_c: {
     ...buildCombinedVehicle("spain_camion_ligero_c", "none"),
     id: "spain_camion_ligero_c",
@@ -531,6 +587,76 @@ export const VEHICLE_CATALOG = {
     modelVariant: "Autocar rígido 3 ejes (Batalla 7,45 m, longitud total 15,00 m)",
     category: "Vehículo patrón oficial Norma 3.1-IC (Autobús A)"
   },
+  rigid_truck_2axle: {
+    ...buildCombinedVehicle("rigid_truck_2axle", "none"),
+    id: "rigid_truck_2axle",
+    presetKey: "rigid_truck_2axle",
+    tractorKey: "rigid_truck_2axle",
+    trailerKey: "none",
+    name: "Camión rígido 2 ejes (8,50 m)",
+    modelVariant: "Camión rígido 2 ejes 4x2 (Batalla 4.500 mm, longitud total 8,50 m)",
+    category: "Camión rígido de distribución 2 ejes (18 t)"
+  },
+  rigid_truck_3axle: {
+    ...buildCombinedVehicle("rigid_truck_3axle", "none"),
+    id: "rigid_truck_3axle",
+    presetKey: "rigid_truck_3axle",
+    tractorKey: "rigid_truck_3axle",
+    trailerKey: "none",
+    name: "Camión rígido 3 ejes (10,20 m)",
+    modelVariant: "Camión rígido 3 ejes 6x2 (Batalla 5.100 mm, longitud total 10,20 m)",
+    category: "Camión rígido pesado 3 ejes (26 t)"
+  },
+  city_bus_12m: {
+    ...buildCombinedVehicle("city_bus_12m", "none"),
+    id: "city_bus_12m",
+    presetKey: "city_bus_12m",
+    tractorKey: "city_bus_12m",
+    trailerKey: "none",
+    name: "Autobús urbano estándar clase I (12,00 m)",
+    modelVariant: "Autobús urbano rígido estándar clase I (Batalla 5.850 mm, longitud total 12,00 m)",
+    category: "Transporte público urbano rígido (12,00 m)"
+  },
+  coach_bus_15m: {
+    ...buildCombinedVehicle("coach_bus_15m", "none"),
+    id: "coach_bus_15m",
+    presetKey: "coach_bus_15m",
+    tractorKey: "coach_bus_15m",
+    trailerKey: "none",
+    name: "Autobús interurbano 3 ejes (15,00 m)",
+    modelVariant: "Autocar de largo recorrido 3 ejes (Batalla 7.100 mm, longitud total 15,00 m)",
+    category: "Transporte de viajeros clase III (15,00 m)"
+  },
+  // 3. ESTÁNDARES Y NORMATIVA — ARTICULADOS, TRENES Y EMS
+  spain_camion_articulado_t: {
+    ...buildCombinedVehicle("spain_tractor_t", "spain_semitrailer_t"),
+    id: "spain_camion_articulado_t",
+    presetKey: "spain_camion_articulado_t",
+    tractorKey: "spain_tractor_t",
+    trailerKey: "spain_semitrailer_t",
+    name: "Camión articulado patrón (T) — Norma 3.1-IC",
+    modelVariant: "Tractora 4x2 (Batalla 3,90 m, h=0,70 m) + Semirremolque trídem 13,60 m (L_total 16,50 m)",
+    category: "Vehículo patrón oficial Norma 3.1-IC (Vehículo articulado T)"
+  },
+  generic_schlepp_1650: {
+    ...buildCombinedVehicle("generic_schlepp_tractor", "generic_schlepp_trailer"),
+    id: "generic_schlepp_1650",
+    presetKey: "generic_schlepp_1650",
+    tractorKey: "generic_schlepp_tractor",
+    trailerKey: "generic_schlepp_trailer",
+    name: "[PROVISIONAL / REFERENCIA] Tráiler de contraste Schlepp",
+    modelVariant: "Configuración original de prueba (models/trailer_1650_giro90.toml)",
+    category: "Perfil de prueba / validación cruzada (No comercial)",
+    verified: false,
+    verificationBadge: "Perfil provisional de prueba (No apto para certificar obra real)",
+    traceability: {
+      sources: [
+        "Archivo de prueba local models/trailer_1650_giro90.toml para validación frente a brombirium/schlepp"
+      ],
+      confidence: "Perfil sintético para contraste numérico exacto con simulation_data_rich.json. El voladizo trasero del semirremolque (2,80 m) es inferior al de un semirremolque real de 13,60 m (4,20 m)."
+    }
+  },
+  // 4. MARCAS COMERCIALES — CONJUNTOS ARTICULADOS
   renault_t_4x2_sko: {
     ...buildCombinedVehicle("renault_t_480", "schmitz_sko_cool"),
     id: "renault_t_4x2_sko",
@@ -580,64 +706,6 @@ export const VEHICLE_CATALOG = {
     name: "Scania R 450 (4x2) + Schmitz S.KO Cool",
     modelVariant: "Scania R 450 Highline (Batalla 3.750 mm) + Semirremolque Frigorífico 3 ejes (13,62 m)",
     category: "Conjunto articulado frigorífico 5 ejes (40 t)"
-  },
-  generic_schlepp_1650: {
-    ...buildCombinedVehicle("generic_schlepp_tractor", "generic_schlepp_trailer"),
-    id: "generic_schlepp_1650",
-    presetKey: "generic_schlepp_1650",
-    tractorKey: "generic_schlepp_tractor",
-    trailerKey: "generic_schlepp_trailer",
-    name: "[PROVISIONAL / REFERENCIA] Tráiler de contraste Schlepp",
-    modelVariant: "Configuración original de prueba (models/trailer_1650_giro90.toml)",
-    category: "Perfil de prueba / validación cruzada (No comercial)",
-    verified: false,
-    verificationBadge: "Perfil provisional de prueba (No apto para certificar obra real)",
-    traceability: {
-      sources: [
-        "Archivo de prueba local models/trailer_1650_giro90.toml para validación frente a brombirium/schlepp"
-      ],
-      confidence: "Perfil sintético para contraste numérico exacto con simulation_data_rich.json. El voladizo trasero del semirremolque (2,80 m) es inferior al de un semirremolque real de 13,60 m (4,20 m)."
-    }
-  },
-  rigid_truck_2axle: {
-    ...buildCombinedVehicle("rigid_truck_2axle", "none"),
-    id: "rigid_truck_2axle",
-    presetKey: "rigid_truck_2axle",
-    tractorKey: "rigid_truck_2axle",
-    trailerKey: "none",
-    name: "Camión rígido 2 ejes (8,50 m)",
-    modelVariant: "Camión rígido 2 ejes 4x2 (Batalla 4.500 mm, longitud total 8,50 m)",
-    category: "Camión rígido de distribución 2 ejes (18 t)"
-  },
-  rigid_truck_3axle: {
-    ...buildCombinedVehicle("rigid_truck_3axle", "none"),
-    id: "rigid_truck_3axle",
-    presetKey: "rigid_truck_3axle",
-    tractorKey: "rigid_truck_3axle",
-    trailerKey: "none",
-    name: "Camión rígido 3 ejes (10,20 m)",
-    modelVariant: "Camión rígido 3 ejes 6x2 (Batalla 5.100 mm, longitud total 10,20 m)",
-    category: "Camión rígido pesado 3 ejes (26 t)"
-  },
-  city_bus_12m: {
-    ...buildCombinedVehicle("city_bus_12m", "none"),
-    id: "city_bus_12m",
-    presetKey: "city_bus_12m",
-    tractorKey: "city_bus_12m",
-    trailerKey: "none",
-    name: "Autobús urbano estándar clase I (12,00 m)",
-    modelVariant: "Autobús urbano rígido estándar clase I (Batalla 5.850 mm, longitud total 12,00 m)",
-    category: "Transporte público urbano rígido (12,00 m)"
-  },
-  coach_bus_15m: {
-    ...buildCombinedVehicle("coach_bus_15m", "none"),
-    id: "coach_bus_15m",
-    presetKey: "coach_bus_15m",
-    tractorKey: "coach_bus_15m",
-    trailerKey: "none",
-    name: "Autobús interurbano 3 ejes (15,00 m)",
-    modelVariant: "Autocar de largo recorrido 3 ejes (Batalla 7.100 mm, longitud total 15,00 m)",
-    category: "Transporte de viajeros clase III (15,00 m)"
   },
   road_train_1875: {
     id: "road_train_1875",
