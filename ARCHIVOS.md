@@ -24,7 +24,7 @@
 | `web/js/export/dxf_importer.js` | `./web/js/export/` | Archivos de trabajo | Parser cliente de archivos CAD DXF con autodetección de capas | Válido | Alta |
 | `web/js/export/geojson_importer.js` | `./web/js/export/` | Archivos de trabajo | Parser cliente de cartografía GeoJSON con georreferenciación recíproca PNOA | Válido | Alta |
 | `web/js/export/exporters.js` | `./web/js/export/` | Archivos de trabajo | Generadores de archivos de salida en formato DXF multicapa y SVG métrico | Válido | Alta |
-| `tests/test_engine.mjs` | `./tests/` | Scripts | Batería de 59 pruebas automáticas de verificación matemática e ingenieril | Válido | Crítica |
+| `tests/test_engine.mjs` | `./tests/` | Scripts | Batería de 62 pruebas automáticas de verificación matemática e ingenieril | Válido | Crítica |
 | `scripts/test_normativa_espanola.mjs` | `./scripts/` | Scripts | Batería de 20 pruebas automáticas de validación con la normativa española de carreteras | Válido | Crítica |
 | `scripts/build_standalone_html.mjs` | `./scripts/` | Scripts | Script generador de los archivos HTML autónomos monobloque | Válido | Alta |
 | `ejemplo_glorieta_espana.geojson` | `./` | Datos de prueba | Escenario de prueba geoespacial oficial (Glorieta M-501 Boadilla del Monte) | Válido | Alta |

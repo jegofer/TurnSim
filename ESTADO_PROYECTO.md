@@ -4,12 +4,12 @@
 - **Proyecto:** TurnSim / Open Swept Path Analyzer (OSPA)
 - **Objetivo:** Herramienta web de ingeniería civil para el análisis cinemático de trayectorias de barrido de vehículos pesados (*Swept Path Analysis*) sin dependencias de servidor.
 - **Estado:** COMPLETADO / OPERATIVO
-- **Fecha de actualización:** 2026-11-12
+- **Fecha de actualización:** 2026-11-23
 - **Última tarea completada:** 
-  1. Interpolación cúbica PCHIP anti-overshoot en splines CAD de trazado (`sampleCatmullRomSpline` y `samplePchipSpline`), corrigiendo la sobreoscilación y la desviación del barrido fuera de la línea dibujada (INC-007 / DEC-021).
-  2. Alineación milimétrica de origen cuando la referencia es el eje director delantero (`front_axle`) e integración directa de splines en `simulateManeuver()` (`seg.type === 'spline'`).
-  3. Control de velocidad de animación constante en calzada en metros por segundo ($v = 2,0\text{ m/s}$ a $1\times$) mediante búsqueda binaria de distancia acumulada, eliminando la aceleración anómala en tramos de curva (INC-007 / DEC-021).
-  4. Suite de pruebas con 59/59 pruebas generales y 20/20 pruebas normativas superadas al 100% (79 pruebas en total).
+  1. Informe técnico apartado 3 enfocado al `bbox + 2,0 m` de la trayectoria de barrido con miniatura de situación general e indicador de encuadre, más formulario de diligencia técnica en el panel 6 (`TEST-44`, DEC-023).
+  2. Aceleración del motor de cálculo: unión booleana Clipper por bloques (*Divide & Conquer*), reutilización de unión base para `ClipperOffset`, ventana deslizante $O(1)$ en secciones transversales, poda AABB en `s.trailers` y CCD (`INC-008`, reducción de 7,58 s a 0,89 s en 60 obstáculos), diferido 3D en modo 2D y `previewMode` ligero al arrastrar (`TEST-45`, DEC-024).
+  3. Maniobras combinadas avance / marcha atrás en vértices: menú contextual clic derecho, conmutador `D/R` + tecla `R`, detección automática de cúspides ($\Delta\theta \ge 125^\circ$), continuidad $G^1$ y corrección `front_axle` en retroceso (`TEST-46`, DEC-025).
+  4. Suite de pruebas con 62/62 pruebas generales y 20/20 pruebas normativas superadas al 100% (82 pruebas en total), subido a GitHub (`1a0e2ec`).
 - **Próxima tarea que debe realizarse:** Según nuevas instrucciones del usuario.
 
 ### Progreso
@@ -44,3 +44,6 @@
 | Velocidad de animación constante en calzada | COMPLETADA | Avance temporal por distancia métrica acumulada en lugar de estados por segundo (DEC-021) |
 | Autoencuadre dinámico al activar Visor 3D | COMPLETADA | Reencuadre y cálculo de envolvente 3D integral al cambiar de vista (DEC-022) |
 | Traducción al español de importador CAD/GIS y etapas | COMPLETADA | Modal de correspondencia de capas DXF, drop-zone, títulos de etapa y paridad bilingüe en i18n |
+| Planta de detalle `bbox + 2 m`, plano general y diligencia en panel 6 | COMPLETADA | Encuadre enfocado, miniatura de situación general e inputs de diligencia (`TEST-44`, DEC-023) |
+| Aceleración de envolventes, poda CCD `s.trailers` y diferido 3D | COMPLETADA | Divide & Conquer en Clipper, reutilización de offset y poda AABB en colisiones (`TEST-45`, INC-008) |
+| Maniobras combinadas avance / marcha atrás desde vértices | COMPLETADA | Menú contextual clic derecho, tecla `R`, detección de cúspides $> 125^\circ$ y continuidad $G^1$ (`TEST-46`, DEC-025) |

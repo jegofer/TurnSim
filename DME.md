@@ -68,17 +68,17 @@ Proporcionar una alternativa profesional, libre y científicamente rigurosa a so
 - `/TurnSim_Engineering_Audit/`: Informes técnicos de la auditoría matemática y estructural.
 
 ## 12. Estado actual del proyecto
-- Motor cinemático y geométrico plenamente validado (47/47 pruebas unitarias superadas).
-- Trazador interactivo de rutas por waypoints corregido y verificado: posicionamiento en P1, cálculo dinámico a partir de P2 y reproducción fluida.
-- Carga e importación de planos CAD DXF operativa con ajuste automático de escala (`fitToScene`).
-- Pantalla inicial limpia y en reposo hasta interacción del usuario.
+- Motor cinemático y geométrico plenamente validado (62/62 pruebas unitarias en `tests/test_engine.mjs` y 20/20 pruebas normativas en `scripts/test_normativa_espanola.mjs`).
+- Trazador interactivo de rutas por waypoints operativo con soporte de maniobras combinadas avance/marcha atrás en vértices (menú contextual, conmutador `D/R` y detección automática de cúspides $\ge 125^\circ$).
+- Cálculo optimizado de envolventes (Divide & Conquer en Clipper, reutilización de offset) y colisiones CCD con poda AABB completa en tractora y semirremolques.
+- Informe técnico estructurado con planta de detalle (`bbox + 2 m` de trayectoria), miniatura de situación general y formulario de diligencia técnica en el panel 6.
 
 ## 13. Tareas completadas
 - Ejecución completa de las Fases 1, 2 y 3 del plan de mejoras y auditoría técnica.
-- Corrección de visualización de planos CAD y recalibrado del zoom de escena.
-- Resolución de la incidencia de waypoints con valores `NaN` y congelación de animación.
-- Integración de Web Worker con soporte de vehículo completo en paquetes autónomos.
-- Mantenimiento y verificación de 47 pruebas analíticas y normativas.
+- Corrección de visualización de planos CAD, GeoJSON/PNOA y recalibrado del zoom de escena.
+- Resolución de incidencias de waypoints, Web Worker, splines PCHIP anti-overshoot y poda AABB en colisiones CCD (`INC-008`).
+- Implementación de maniobras combinadas avance/marcha atrás en vértices, encuadre de detalle en informe PDF y diligencia técnica en panel 6.
+- Mantenimiento y verificación de 62 pruebas analíticas generales y 20 normativas (82/82 PASS).
 
 ## 14. Tareas pendientes
 - Implementar la importación directa de alineaciones complejas desde LandXML o archivos de trazado civil.
@@ -111,3 +111,4 @@ Proporcionar una alternativa profesional, libre y científicamente rigurosa a so
 
 ## 20. Historial de cambios del DME
 - **2026-11-09:** Creación inicial del documento maestro conforme a la estructura de 20 secciones tras la auditoría técnica y la resolución de incidencias en el trazador interactivo y motor cinemático.
+- **2026-11-23:** Actualización de estado tras la implementación del informe de detalle (`bbox + 2 m`) con diligencia técnica, optimización del motor booleano/CCD (`DEC-024`, `INC-008`) y maniobras combinadas avance/marcha atrás en vértices (`DEC-025`), alcanzando 82/82 pruebas superadas.

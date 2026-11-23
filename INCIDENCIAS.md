@@ -106,3 +106,18 @@
 - **Resultado:** Coincidencia milimétrica de la trayectoria y barrido sobre la línea dibujada, eliminación completa de invasiones espurias del semirremolque y velocidad de animación perfectamente uniforme y constante tanto en rectas como en curvas.
 - **Estado:** RESUELTA
 - **Acciones pendientes:** Ninguna.
+
+## INC-008 - Lentitud extrema (> 7,5 s) en cálculo de colisiones con múltiples obstáculos y doble unión Clipper
+
+- **Problema:** Al simular maniobras sobre escenarios con múltiples obstáculos poligonales (típicos de DXF o GeoJSON importados), el cálculo total tardaba varios segundos pese a que la integración RK4 y el visor 2D eran ligeros.
+- **Contexto:** `evaluateObstacleInterferences` en `web/js/engine/collisions.js`, `computeSweptEnvelope` en `web/js/engine/envelope.js` y `recomputeAll` en `web/js/app.js`.
+- **Causa conocida:**
+  1. En `evaluateObstacleInterferences`, la rama `if (s.trailers && s.trailers.length > 0)` —que se ejecuta siempre para vehículos articulados— carecía de filtro AABB tanto en el propio semirremolque como en su cápsula CCD, forzando el cálculo completo `polygonToGeometryDistance` y `convexHull8` en todos los estados para cada obstáculo (7.585 ms en un ensayo con 60 obstáculos y 1.545 estados).
+  2. `computeSweptEnvelope` ejecutaba la unión booleana de todas las cápsulas dos veces cuando `safetyMargin > 0`, y `viewer3D.setData` triangulaba mallas con `earcut` incluso con el visor 3D oculto (`viewMode === "2d"`).
+- **Causa probable:** Ninguna; causa plenamente medida y confirmada por perfilado en Node.js.
+- **Solución aplicada:**
+  1. Incorporado filtro AABB y caché de cápsulas CCD en la rama `s.trailers` junto con búsqueda semilla `seedIdx`/`centerSeedIdx` para acotar `minDistanceSq` desde el primer instante.
+  2. Implementada unión booleana jerárquica por bloques (`CHUNK_SIZE = 36`), reutilización de `baseExPolygons` para `ClipperOffset`, punteros monótonos $O(1)$ en secciones transversales, diferido de `viewer3D.setData` en modo 2D y `previewMode` ligero durante el arrastre.
+- **Resultado:** Tiempo de evaluación de 60 obstáculos reducido de 7.585 ms a 898 ms (~8,4x) y envolvente completa acelerada ~4,8x manteniendo exactitud bit a bit (`TEST-45`).
+- **Estado:** RESUELTA
+- **Acciones pendientes:** Ninguna.

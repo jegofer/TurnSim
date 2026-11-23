@@ -291,3 +291,38 @@
 - **Alternativas consideradas:** Requerir al usuario pulsar el botón de encuadre manual (descartado por perjudicar la inmediatez de uso).
 - **Consecuencias:** Experiencia fluida e instantánea: al hacer clic en «Visor 3D» o «Dividida 2D+3D», la escena 3D se visualiza perfectamente centrada y proporcionada desde el primer instante.
 - **Estado:** VIGENTE
+
+## DEC-023 - Planta técnica enfocada (`bbox + 2 m`), miniatura de situación general y diligencia en Panel 6
+
+- **Fecha:** 2026-11-23
+- **Decisión:**
+  1. En el apartado 3 del informe técnico (`openStructuredTechnicalReport` en `web/js/export/exporters.js`), generar la planta principal SVG mediante `generateSVGDiagram(..., { focusOnTrajectory: true, paddingM: 2.0 })`, calculando el encuadre únicamente sobre la trayectoria de barrido (`computeTrajectoryBbox`) + 2,0 m de margen.
+  2. Superponer en la esquina superior izquierda (`.diagram-overview-inset`) una miniatura del plano CAD/GeoJSON completo (`overviewMode: true`) con indicador rectangular `#detail-viewport-indicator` de la zona de detalle.
+  3. Añadir en el panel 6 (`#stage-block-6`) los campos editables de diligencia técnica (`Autor del estudio`, `Colegiado n.º`, `Fecha`, `Organismo o consultora`), reflejados en HTML/PDF, Markdown y persistencia `.turnsim.json`.
+- **Motivo:** Los planos CAD/GeoJSON extensos reducían la escala de la envolvente en el informe impreso hasta hacer ilegibles las huellas de ruedas y márgenes; además, los técnicos requerían cumplimentar el cajetín de firma antes de imprimir.
+- **Alternativas consideradas:** Mantener el encuadre global completo o recortar en el canvas 2D mediante captura raster (descartado por perder calidad vectorial).
+- **Consecuencias:** Lámina vectorial de alta legibilidad en el informe técnico sin perder la referencia territorial general (`TEST-44`).
+- **Estado:** VIGENTE
+
+## DEC-024 - Aceleración exacta del motor booleano de envolventes, poda CCD y diferido 3D en modo 2D
+
+- **Fecha:** 2026-11-23
+- **Decisión:**
+  1. Agrupar las cápsulas convexas en bloques (`CHUNK_SIZE = 36`) para la unión booleana de `Clipper` (*Divide & Conquer*), reutilizar `baseExPolygons` en `computeSweptEnvelope` para `ClipperOffset` (eliminando la doble unión booleana), y emplear punteros monótonos $O(1)$ en `computeCrossSectionWidth`.
+  2. Añadir búsqueda semilla (`seedIdx`, `centerSeedIdx`) y poda AABB/CCD completa en `s.trailers` dentro de `evaluateObstacleInterferences` (`web/js/engine/collisions.js`).
+  3. Diferir `viewer3D.setData` mientras `viewMode === "2d"` y aplicar un `previewMode` ligero (sin `StrictlySimple`, sin `computeKeyDimensions`, sin CCD ni refresco de tablas/curvas PK) durante el arrastre interactivo de waypoints.
+- **Motivo:** Mantener exactamente la misma precisión numérica ($0{,}000\text{ mm}$ de desviación) eliminando la degradación cuadrática de Vatti y los 7,58 s provocados por la ausencia de poda AABB en `s.trailers` (INC-008).
+- **Alternativas consideradas:** Reducir la resolución del paso RK4 de forma permanente (descartado para no comprometer la precisión normativa).
+- **Consecuencias:** Reducción superior al 70 % en el cálculo completo y respuesta fluida en tiempo real durante el arrastre (`TEST-45`).
+- **Estado:** VIGENTE
+
+## DEC-025 - Maniobras combinadas avance / marcha atrás desde vértices (Híbrido A+B+D + Detección de Cúspides C)
+
+- **Fecha:** 2026-11-23
+- **Decisión:**
+  1. Implementar `splitWaypointsByDirection` en `web/js/engine/kinematics.js` para particionar automáticamente cualquier polilínea en sub-tramos en cada vértice de cambio de sentido, acoplando la tangente inicial (`initialTangentRad`) en la cúspide para garantizar continuidad $G^1$ del rumbo de parada y corrigiendo `front_axle` en `simulateManeuver` cuando `dir === -1`.
+  2. Sustituir el borrado directo con clic derecho en `Viewer2D` por un menú contextual flotante (`#wp-context-menu`) con opciones de marcha atrás/avance desde ese vértice y eliminación; añadir el conmutador en vivo `▶ Avance (D) / ◀ Retroceso (R)` + atajo tecla `R`, detección automática de cúspides ($\Delta\theta \ge 125^\circ$, conmutable vía `#chk-auto-cusps`), diferenciación visual (azul avance / ámbar discontinuo retroceso + insignia `⇄ R` / `⇄ D`) y sufijo `D`/`R` en texto y `.turnsim.json`.
+- **Motivo:** Permitir analizar maniobras reales de atraque a muelle, cambios de sentido en «T» y accesos con inversión de marcha desde la propia digitalización en planta 2D.
+- **Alternativas consideradas:** Obligar al usuario a crear tramos manuales por separado en el panel lateral (descartado por poca agilidad operativa).
+- **Consecuencias:** Flujo intuitivo, reversible y verificado cinemáticamente tanto en `front_axle` como en `rear_axle` (`TEST-46`).
+- **Estado:** VIGENTE

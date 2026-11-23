@@ -7,37 +7,21 @@ TurnSim / Open Swept Path Analyzer (OSPA)
 Herramienta web de cálculo cinemático de giros y análisis de trayectorias de barrido de vehículos pesados (*Swept Path Analysis*) orientada a ingeniería de carreteras, 100% autónoma y ejecutable en navegador sin servidor.
 
 ## SITUACIÓN ACTUAL
-Motor cinemático y geométrico plenamente validado con la normativa española de carreteras (Norma 3.1-IC y Guía de Nudos Viarios OC 32/2012). 59/59 pruebas unitarias superadas en `test_engine.mjs` y 20/20 pruebas superadas en `test_normativa_espanola.mjs` (79 pruebas en total, 100% PASS). La aplicación es 100% monobloque e independiente, funciona al abrirse directamente por doble clic (`file://`) o HTTP, inicia con el visor limpio y enfocado en la acción con apertura directa en la Etapa 1 («1. Escenario y Entorno CAD»), dispone de presets oficiales españoles (F, C, T, A), soporte dual para planos CAD (.DXF) y cartografía geoespacial (.GeoJSON), georreferenciación milimétrica con la ortofoto aérea PNOA (IGN), buscador toponímico OpenStreetMap, trazado mediante Splines continuas PCHIP anti-overshoot y velocidad de animación métrica uniforme y rigurosamente constante en calzada.
+Motor cinemático, envolventes y detección de colisiones plenamente validados con la normativa española de carreteras (Norma 3.1-IC y Guía de Nudos Viarios OC 32/2012). 62/62 pruebas unitarias superadas en `test_engine.mjs` y 20/20 pruebas superadas en `test_normativa_espanola.mjs` (82 pruebas en total, 100% PASS). La aplicación es 100% monobloque e independiente (`file://` o HTTP), soporta maniobras combinadas avance/marcha atrás desde cualquier vértice (menú contextual clic derecho, conmutador `D/R` + tecla `R` y detección automática de cúspides $> 125^\circ$), cálculo booleano optimizado (Divide & Conquer en Clipper, offset reutilizado, ventana deslizante $O(1)$ y poda AABB en colisiones CCD de `s.trailers`), y generación de informes técnicos con planta enfocada al `bbox + 2 m` de la trayectoria, plano general de situación en la esquina superior izquierda y formulario de diligencia técnica en el panel 6.
 
 ## ÚLTIMO TRABAJO REALIZADO
-- **Traducción al Español Técnico de la Herramienta de Carga CAD / GIS y Títulos de Etapa:**
-  - Traducidas y normalizadas todas las cadenas del importador CAD/GIS y el modal de mapeo de capas DXF (`_showDxfLayerMappingModal` en `web/js/app.js`): correspondencia de capas de eje/trayectoria, sentido de marcha (avance/retroceso), radio de acuerdo, obstáculos físicos, bordes de calzada y zonas restringidas.
-  - Normalizadas las etapas del flujo de trabajo: «1. Escenario y entorno CAD / GIS», «2. Selección y cotas de vehículo», «3. Trazado y tramos de maniobra», «4. Simulación cinemática y capas», «5. Análisis de resguardo y obstáculos», «6. Informes técnicos y exportación».
-  - Sincronizadas las claves bilingües en `web/js/i18n/locales.js` (`LOCALES.es` y `LOCALES.en`) y actualización reactiva de la interfaz ante el selector de idioma.
-  - Recompilados todos los paquetes monobloque (`web/index.html`, `web/simulacion_threejs.html`, `simulacion_threejs.html`, `index.html` y `TurnSim_Standalone.html`) mediante `node scripts/build_standalone_html.mjs`.
-  - Verificada la totalidad de las suites de prueba: 59/59 en `test_engine.mjs` y 20/20 en `test_normativa_espanola.mjs` (79/79 PASS).
-- **Interpolación PCHIP Anti-Overshoot y Corrección de Barrido en Splines (DEC-021 / INC-007):**
-  - Identificadas y subsanadas las causas de la desviación de la envolvente de barrido fuera de la línea dibujada:
-    1. Desfase de origen por punto de referencia: con `steeringReferencePoint: 'front_axle'` (por defecto en vehículos españoles de la Norma 3.1-IC), `startPose` ubicaba el eje motriz trasero en el punto $P_0$, dejando el eje director desplazado hacia delante la distancia de batalla ($L_{wb}$ de 3,80 a 7,15 m). Se ajustó `buildSegmentsFromSplineWaypoints` para retroceder la pose inicial del eje motriz cuando la referencia es el eje director, logrando coincidencia milimétrica en el origen.
-    2. Caída a radio de 0,5 m: en curvas cerradas donde $R \le L_{wb}$, la conversión cinemática fijaba un radio artificial de $0,5\text{ m}$ que provocaba giros extremos y latigazos del semirremolque. Se acotó el radio mediante $R_{\text{mín}} = L_{wb} / \tan(\delta_{\text{máx}})$.
-    3. Sobreoscilación (sag) en Catmull-Rom: sustituida por interpolación cúbica de Hermite con preservación de forma (PCHIP) en `sampleCatmullRomSpline` y `samplePchipSpline`, anulando sobreoscilaciones en tangentes de entrada a curva.
-    4. Ejecución cinemática directa de splines: implementado ejecutor para `seg.type === 'spline'` en `simulateManeuver()`, integrando punto a punto a lo largo de la spline sin degradación por segmentación en micro-arcos.
-  - Corrección de radio en tramos rectos para asegurar finitud numérica en `TEST-43` (59/59 PASS).
-- **Velocidad de Animación Constante en Maniobra (DEC-021 / INC-007):**
-  - Identificada la causa de la aceleración del vehículo en tramos de curva: `_startAnimationLoop()` avanzaba un número fijo de estados discretos por segundo (`dt * 28.0`), provocando que en curvas donde $\Delta s = R \cdot \Delta\theta$, la velocidad en calzada se multiplicara en función del radio (de $1,4\text{ m/s}$ en recta a más de $6\text{ m/s}$ en curvas abiertas).
-  - Implementado avance temporal isométrico a velocidad métrica constante en calzada ($v = 2,0\text{ m/s}$ a $1\times$): $\Delta s = v_{\text{nominal}} \cdot \text{playSpeed} \cdot dt$.
-  - Mapeo exacto de distancia a fotograma mediante búsqueda binaria en el vector de estados (`_findFrameIndexForDist`).
-  - Sincronización bidireccional de la distancia métrica acumulada (`currentAnimDistM`) en el deslizador temporal `#slider-timeline`, botón `#btn-play-reset`, salto a fotograma (`jumpToFrame`), avance paso a paso (`stepFrame`) y borrado de trazado.
-- **Soporte Visual e Informes de Tramos Spline:**
-  - En `_renderSegmentsListUI()` (`web/js/app.js`), diseño de tarjeta técnica para tramos `spline` mostrando longitud total y radio mínimo.
-  - En `web/js/export/exporters.js`, formateo de tramos spline en la tabla del informe imprimible HTML y en la memoria técnica Markdown.
-- **Autoencuadre Dinámico en Visor 3D (DEC-022):**
-  - Implementado autoencuadre integral de la escena (`viewer3D.fitToScene()`) de forma automática cada vez que se pulsa el botón «Visor 3D» o «Dividida 2D+3D» en el HUD superior o en la gaveta lateral de capas.
-  - Ampliado el cálculo del cuadro límite tridimensional para abarcar contornos del vehículo, semirremolque, envolventes, obstáculos y entidades CAD de fondo.
-- **Compilación y Verificación de Pruebas:**
-  - Regenerados los bundles monobloque (`web/index.html`, `web/simulacion_threejs.html`, `simulacion_threejs.html`, `index.html`, `TurnSim_Standalone.html`) mediante `node scripts/build_standalone_html.mjs`.
-  - Verificada la suite completa de 59 pruebas en `tests/test_engine.mjs` (59 superadas, 0 fallidas).
-  - Verificada la batería de validación con normativa española en `scripts/test_normativa_espanola.mjs` (20 superadas, 0 fallidas).
+- **Informe Técnico Enfocado (`bbox + 2 m`), Plano General y Diligencia Técnica (DEC-023):**
+  - Apartado 3 del informe HTML/PDF (`web/js/export/exporters.js`): planta principal recortada al `bbox + 2,0 m` de la trayectoria de barrido (`focusOnTrajectory: true`) para ver en detalle la envolvente y contexto inmediato, con recuadro flotante en la esquina superior izquierda («Situación general») mostrando el plano CAD/GeoJSON completo e indicador `#detail-viewport-indicator`.
+  - Formulario de **Diligencia técnica del proyecto** en el panel 6 (`Autor del estudio`, `Colegiado n.º`, `Fecha`, `Organismo o consultora`) con inyección en HTML/PDF y Markdown y persistencia en `.turnsim.json` (`TEST-44`).
+- **Aceleración del Motor de Envolventes, Colisiones y Preview Interactivo (DEC-024 / INC-008):**
+  - Unión booleana jerárquica por bloques (`CHUNK_SIZE = 36`) en `computeSweptEnvelope`, reutilización de `baseExPolygons` para `ClipperOffset` (eliminando la doble unión booleana) y punteros monótonos $O(1)$ en `computeCrossSectionWidth` (`web/js/engine/envelope.js`).
+  - Corregida la ausencia de poda AABB en `s.trailers` y sus cápsulas CCD en `evaluateObstacleInterferences` (`web/js/engine/collisions.js`), añadiendo búsqueda semilla inicial `seedIdx`/`centerSeedIdx` (reducción de **7.585 ms a 898 ms** en 60 obstáculos de 20 vértices).
+  - Diferido `viewer3D.setData` cuando `viewMode === "2d"` y modo `previewMode` ligero al arrastrar waypoints (`TEST-45`).
+- **Maniobras Combinadas Avance / Marcha Atrás en Vértices (DEC-025):**
+  - `splitWaypointsByDirection` en `web/js/engine/kinematics.js` con partición automática en sub-tramos, tangente inicial acoplada (`initialTangentRad`) en cúspides, corrección exacta `front_axle` en retroceso y detección automática opcional de cúspides ($\Delta\theta \ge 125^\circ$).
+  - Menú contextual `#wp-context-menu` con clic derecho sobre cualquier vértice, conmutador `▶ Avance (D) / ◀ Retroceso (R)` + tecla `R`, diferenciación visual en planta 2D (azul avance / ámbar discontinuo retroceso + insignia `⇄ R` / `⇄ D`) y prueba `TEST-46`.
+- **Compilación y Subida a GitHub:**
+  - Regenerados los 5 bundles monobloque (`node scripts/build_standalone_html.mjs`), verificadas `62/62` pruebas en `tests/test_engine.mjs` y `20/20` en `scripts/test_normativa_espanola.mjs`, y publicados los commits `f41d6ea`, `7da37a9`, `619b4be` y `1a0e2ec` en `origin/main`.
 
 ## PRÓXIMA ACCIÓN
 - Preparación y ensayo de nuevos escenarios viarios complejos (curvas en S sin recta intermedia, glorietas con radio interior $< 15\text{ m}$).

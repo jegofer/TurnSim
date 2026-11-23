@@ -1,5 +1,21 @@
 # Historial de cambios
 
+## 2026-11-23
+
+### Añadido
+- **Maniobras Combinadas Avance / Marcha Atrás en Vértices de Trazado (DEC-025):**
+  - Partición automática por sub-tramos de sentido en `splitWaypointsByDirection` (`web/js/engine/kinematics.js`), acoplamiento de tangente inicial (`initialTangentRad`) en cúspides y corrección exacta de `front_axle` en retroceso.
+  - Menú contextual flotante (`#wp-context-menu`) con clic derecho en vértices, conmutador en vivo `▶ Avance (D) / ◀ Retroceso (R)` + tecla `R`, detección automática de cúspides ($\Delta\theta \ge 125^\circ$, conmutable vía `#chk-auto-cusps`), visualización diferenciada en planta 2D y prueba `TEST-46`.
+- **Planta Técnica Enfocada (`bbox + 2 m`), Plano General y Diligencia Técnica en Panel 6 (DEC-023):**
+  - Recorte automático de la planta del apartado 3 del informe técnico al `bbox + 2,0 m` de la trayectoria (`computeTrajectoryBbox`), con recuadro flotante «Situación general» en la esquina superior izquierda e indicador de encuadre `#detail-viewport-indicator`.
+  - Formulario de diligencia técnica en el panel 6 (`Autor del estudio`, `Colegiado n.º`, `Fecha`, `Organismo o consultora`) integrado en informes HTML/PDF, Markdown y `.turnsim.json` (`TEST-44`).
+
+### Modificado / Corregido
+- **Aceleración del Motor de Envolventes, Colisiones CCD y Preview en Vivo (DEC-024 / INC-008):**
+  - Unión booleana por bloques (*Divide & Conquer*) en Clipper, reutilización de `baseExPolygons` para `ClipperOffset`, y ventana deslizante $O(1)$ en `computeCrossSectionWidth` (`web/js/engine/envelope.js`).
+  - Corregida la ausencia de poda AABB en `s.trailers` y sus cápsulas CCD en `evaluateObstacleInterferences` (`web/js/engine/collisions.js`), junto con búsqueda semilla `seedIdx`/`centerSeedIdx`.
+  - Diferido `viewer3D.setData` mientras `viewMode === "2d"` y modo `previewMode` ligero al arrastrar waypoints (`TEST-45`).
+
 ## 2026-11-12
 
 ### Añadido
