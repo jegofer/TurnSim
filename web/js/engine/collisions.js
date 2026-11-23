@@ -433,10 +433,40 @@ export function evaluateObstacleInterferences(statesOrSimResult, obstacles, opti
   const nStates = states.length;
   const tractorAABBs = new Array(nStates);
   const trailerAABBs = new Array(nStates);
+  const tractorCapAABBs = enableCCD && nStates > 1 ? new Array(nStates - 1) : null;
+  const trailerCapAABBs = enableCCD && nStates > 1 ? new Array(nStates - 1) : null;
+  const tractorCapPolys = enableCCD && nStates > 1 ? new Array(nStates - 1) : null;
+  const trailerCapPolys = enableCCD && nStates > 1 ? new Array(nStates - 1) : null;
+
   for (let i = 0; i < nStates; i++) {
     const s = states[i];
     tractorAABBs[i] = computePolygonAABB(s.tractorPolygon);
     trailerAABBs[i] = s.trailerPolygon ? computePolygonAABB(s.trailerPolygon) : null;
+  }
+
+  if (enableCCD && nStates > 1) {
+    for (let i = 0; i < nStates - 1; i++) {
+      const tA = tractorAABBs[i];
+      const tB = tractorAABBs[i + 1];
+      if (tA && tB) {
+        tractorCapAABBs[i] = {
+          minX: tA.minX < tB.minX ? tA.minX : tB.minX,
+          minY: tA.minY < tB.minY ? tA.minY : tB.minY,
+          maxX: tA.maxX > tB.maxX ? tA.maxX : tB.maxX,
+          maxY: tA.maxY > tB.maxY ? tA.maxY : tB.maxY
+        };
+      }
+      const trA = trailerAABBs[i];
+      const trB = trailerAABBs[i + 1];
+      if (trA && trB) {
+        trailerCapAABBs[i] = {
+          minX: trA.minX < trB.minX ? trA.minX : trB.minX,
+          minY: trA.minY < trB.minY ? trA.minY : trB.minY,
+          maxX: trA.maxX > trB.maxX ? trA.maxX : trB.maxX,
+          maxY: trA.maxY > trB.maxY ? trA.maxY : trB.maxY
+        };
+      }
+    }
   }
 
   for (const obs of obstacles || []) {
@@ -548,28 +578,24 @@ export function evaluateObstacleInterferences(statesOrSimResult, obstacles, opti
       // 3. Detección continua de colisiones (CCD) entre pasos i e i+1
       if (enableCCD && i < nStates - 1) {
         const sNext = states[i + 1];
-        const tNextAabb = tractorAABBs[i + 1];
-        if (tAabb && tNextAabb) {
-          const capAabb = {
-            minX: Math.min(tAabb.minX, tNextAabb.minX),
-            minY: Math.min(tAabb.minY, tNextAabb.minY),
-            maxX: Math.max(tAabb.maxX, tNextAabb.maxX),
-            maxY: Math.max(tAabb.maxY, tNextAabb.maxY)
-          };
-          if (!obsAABB || aabbMinDistanceSq(capAabb, obsAABB) <= minDistanceSq) {
-            const capPoly = convexHull8([...s.tractorPolygon, ...sNext.tractorPolygon]);
-            const resCap = evalPolyToObs(capPoly);
-            if (resCap.distance < minDistance) {
-              minDistance = resCap.distance;
-              const b = minDistance + 1e-6;
-              if (b * b < minDistanceSq) minDistanceSq = b * b;
-              intersected = resCap.intersects;
-              bestStepIndex = i;
-              bestDistAlongPath = (s.dist + sNext.dist) / 2;
-              bestPointVehicle = resCap.pointA;
-              bestPointObstacle = resCap.pointB;
-              bestPart = "Cabeza tractora";
-            }
+        const capAabbT = tractorCapAABBs[i];
+        if (capAabbT && (!obsAABB || aabbMinDistanceSq(capAabbT, obsAABB) <= minDistanceSq)) {
+          let capPoly = tractorCapPolys[i];
+          if (!capPoly) {
+            capPoly = convexHull8([...s.tractorPolygon, ...sNext.tractorPolygon]);
+            tractorCapPolys[i] = capPoly;
+          }
+          const resCap = evalPolyToObs(capPoly);
+          if (resCap.distance < minDistance) {
+            minDistance = resCap.distance;
+            const b = minDistance + 1e-6;
+            if (b * b < minDistanceSq) minDistanceSq = b * b;
+            intersected = resCap.intersects;
+            bestStepIndex = i;
+            bestDistAlongPath = (s.dist + sNext.dist) / 2;
+            bestPointVehicle = resCap.pointA;
+            bestPointObstacle = resCap.pointB;
+            bestPart = "Cabeza tractora";
           }
         }
 
@@ -593,29 +619,24 @@ export function evaluateObstacleInterferences(statesOrSimResult, obstacles, opti
             }
           }
         } else if (s.trailerPolygon && sNext.trailerPolygon) {
-          const trAabb = trailerAABBs[i];
-          const trNextAabb = trailerAABBs[i + 1];
-          if (trAabb && trNextAabb) {
-            const capAabb = {
-              minX: Math.min(trAabb.minX, trNextAabb.minX),
-              minY: Math.min(trAabb.minY, trNextAabb.minY),
-              maxX: Math.max(trAabb.maxX, trNextAabb.maxX),
-              maxY: Math.max(trAabb.maxY, trNextAabb.maxY)
-            };
-            if (!obsAABB || aabbMinDistanceSq(capAabb, obsAABB) <= minDistanceSq) {
-              const capPoly = convexHull8([...s.trailerPolygon, ...sNext.trailerPolygon]);
-              const resCap = evalPolyToObs(capPoly);
-              if (resCap.distance < minDistance) {
-                minDistance = resCap.distance;
-                const b = minDistance + 1e-6;
-                if (b * b < minDistanceSq) minDistanceSq = b * b;
-                intersected = resCap.intersects;
-                bestStepIndex = i;
-                bestDistAlongPath = (s.dist + sNext.dist) / 2;
-                bestPointVehicle = resCap.pointA;
-                bestPointObstacle = resCap.pointB;
-                bestPart = "Semirremolque";
-              }
+          const capAabbTr = trailerCapAABBs[i];
+          if (capAabbTr && (!obsAABB || aabbMinDistanceSq(capAabbTr, obsAABB) <= minDistanceSq)) {
+            let capPoly = trailerCapPolys[i];
+            if (!capPoly) {
+              capPoly = convexHull8([...s.trailerPolygon, ...sNext.trailerPolygon]);
+              trailerCapPolys[i] = capPoly;
+            }
+            const resCap = evalPolyToObs(capPoly);
+            if (resCap.distance < minDistance) {
+              minDistance = resCap.distance;
+              const b = minDistance + 1e-6;
+              if (b * b < minDistanceSq) minDistanceSq = b * b;
+              intersected = resCap.intersects;
+              bestStepIndex = i;
+              bestDistAlongPath = (s.dist + sNext.dist) / 2;
+              bestPointVehicle = resCap.pointA;
+              bestPointObstacle = resCap.pointB;
+              bestPart = "Semirremolque";
             }
           }
         }

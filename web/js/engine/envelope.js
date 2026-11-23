@@ -162,7 +162,18 @@ export function buildAllOBBs(states, vehicle, margin = 0.0) {
  * intersectando la recta normal con las siluetas cercanas dentro de una ventana de distancia temporal (GEOM-03).
  * Devuelve { width, p1, p2, tMin, tMax } o null.
  */
-export function computeCrossSectionWidth(px, py, nx, ny, obbs, maxSearchDist = 18.0, centerDist = null, maxDistWindow = 22.0) {
+export function computeCrossSectionWidth(
+  px,
+  py,
+  nx,
+  ny,
+  obbs,
+  maxSearchDist = 18.0,
+  centerDist = null,
+  maxDistWindow = 22.0,
+  startIdx = 0,
+  endIdx = obbs.length
+) {
   let minT = +Infinity;
   let maxT = -Infinity;
   // Vector tangente unitario perpendicular a la normal (nx, ny)
@@ -170,7 +181,7 @@ export function computeCrossSectionWidth(px, py, nx, ny, obbs, maxSearchDist = 1
   const ty = -nx;
   const boxLimit = maxSearchDist + 10.0;
 
-  for (let i = 0; i < obbs.length; i++) {
+  for (let i = startIdx; i < endIdx; i++) {
     const obb = obbs[i];
     // GEOM-03: Restringir a la ventana física y temporal del vehículo para evitar cortes oblicuos
     // con tramos distantes de la maniobra en retornos en S o retrocesos
@@ -368,7 +379,7 @@ export function computeAdaptiveSampledIndices(states, options = {}) {
   return indices;
 }
 
-export function computeSweptEnvelope(states, vehicle, margin = 0.0) {
+export function computeSweptEnvelope(states, vehicle, margin = 0.0, options = {}) {
   if (!states || states.length === 0) {
     return {
       envelopePolygon: [],
@@ -378,7 +389,8 @@ export function computeSweptEnvelope(states, vehicle, margin = 0.0) {
       rightBoundary: [],
       maxSweptWidthM: 0,
       maxSweptWidthSection: null,
-      obbs: []
+      obbs: [],
+      baseExPolygons: []
     };
   }
 
@@ -387,67 +399,98 @@ export function computeSweptEnvelope(states, vehicle, margin = 0.0) {
   const tr = vehicle.trailer;
   const hasTrailer = Boolean(tr && states[0].tx !== null);
 
-  // 1. Muestreo adaptativo de estados para optimizar cápsulas garantizando Delta_theta <= 1.5° (MEJ-03)
-  const sampledIndices = computeAdaptiveSampledIndices(states);
+  let baseExPolygons = options.precomputedBaseExPolygons || null;
 
-  // 2. Construir cápsulas convexas Conv(B_k U B_{k+1}) para la tractora y el semirremolque
-  const clipper = new ClipperLib.Clipper();
-  clipper.StrictlySimple = true;
+  if (!baseExPolygons) {
+    // 1. Muestreo adaptativo de estados para optimizar cápsulas garantizando Delta_theta <= 1.5° (MEJ-03)
+    const sampledIndices = computeAdaptiveSampledIndices(states, options.samplingOptions);
 
-  if (sampledIndices.length === 1) {
-    const s0 = states[sampledIndices[0]];
-    const tPoly0 = s0.tractorPolygon || computeBodyPolygon(s0.x, s0.y, s0.heading, tv, 0.0);
-    clipper.AddPath(tPoly0.map(ptToClipper), ClipperLib.PolyType.ptSubject, true);
-    if (s0.trailers && s0.trailers.length > 0) {
-      for (const trState of s0.trailers) {
-        if (trState.polygon) {
-          clipper.AddPath(trState.polygon.map(ptToClipper), ClipperLib.PolyType.ptSubject, true);
-        }
-      }
-    } else if (hasTrailer) {
-      const trPoly0 = s0.trailerPolygon || (s0.tx !== null ? computeBodyPolygon(s0.tx, s0.ty, s0.theading, tr, 0.0) : null);
-      if (trPoly0) {
-        clipper.AddPath(trPoly0.map(ptToClipper), ClipperLib.PolyType.ptSubject, true);
-      }
-    }
-  } else {
-    for (let si = 0; si < sampledIndices.length - 1; si++) {
-      const s0 = states[sampledIndices[si]];
-      const s1 = states[sampledIndices[si + 1]];
+    // 2. Construir cápsulas convexas Conv(B_k U B_{k+1}) para la tractora y el semirremolque
+    const subjectPaths = [];
+
+    if (sampledIndices.length === 1) {
+      const s0 = states[sampledIndices[0]];
       const tPoly0 = s0.tractorPolygon || computeBodyPolygon(s0.x, s0.y, s0.heading, tv, 0.0);
-      const tPoly1 = s1.tractorPolygon || computeBodyPolygon(s1.x, s1.y, s1.heading, tv, 0.0);
-      const hullT = convexHull8([...tPoly0, ...tPoly1]);
-      clipper.AddPath(hullT.map(ptToClipper), ClipperLib.PolyType.ptSubject, true);
-
+      subjectPaths.push(tPoly0.map(ptToClipper));
       if (s0.trailers && s0.trailers.length > 0) {
-        for (let j = 0; j < s0.trailers.length; j++) {
-          const trPoly0 = s0.trailers[j].polygon;
-          const trPoly1 = s1.trailers && s1.trailers[j] ? s1.trailers[j].polygon : null;
-          if (trPoly0 && trPoly1) {
-            const hullTr = convexHull8([...trPoly0, ...trPoly1]);
-            clipper.AddPath(hullTr.map(ptToClipper), ClipperLib.PolyType.ptSubject, true);
+        for (const trState of s0.trailers) {
+          if (trState.polygon) {
+            subjectPaths.push(trState.polygon.map(ptToClipper));
           }
         }
       } else if (hasTrailer) {
         const trPoly0 = s0.trailerPolygon || (s0.tx !== null ? computeBodyPolygon(s0.tx, s0.ty, s0.theading, tr, 0.0) : null);
-        const trPoly1 = s1.trailerPolygon || (s1.tx !== null ? computeBodyPolygon(s1.tx, s1.ty, s1.theading, tr, 0.0) : null);
-        if (trPoly0 && trPoly1) {
-          const hullTr = convexHull8([...trPoly0, ...trPoly1]);
-          clipper.AddPath(hullTr.map(ptToClipper), ClipperLib.PolyType.ptSubject, true);
+        if (trPoly0) {
+          subjectPaths.push(trPoly0.map(ptToClipper));
+        }
+      }
+    } else {
+      for (let si = 0; si < sampledIndices.length - 1; si++) {
+        const s0 = states[sampledIndices[si]];
+        const s1 = states[sampledIndices[si + 1]];
+        const tPoly0 = s0.tractorPolygon || computeBodyPolygon(s0.x, s0.y, s0.heading, tv, 0.0);
+        const tPoly1 = s1.tractorPolygon || computeBodyPolygon(s1.x, s1.y, s1.heading, tv, 0.0);
+        const hullT = convexHull8([...tPoly0, ...tPoly1]);
+        subjectPaths.push(hullT.map(ptToClipper));
+
+        if (s0.trailers && s0.trailers.length > 0) {
+          for (let j = 0; j < s0.trailers.length; j++) {
+            const trPoly0 = s0.trailers[j].polygon;
+            const trPoly1 = s1.trailers && s1.trailers[j] ? s1.trailers[j].polygon : null;
+            if (trPoly0 && trPoly1) {
+              const hullTr = convexHull8([...trPoly0, ...trPoly1]);
+              subjectPaths.push(hullTr.map(ptToClipper));
+            }
+          }
+        } else if (hasTrailer) {
+          const trPoly0 = s0.trailerPolygon || (s0.tx !== null ? computeBodyPolygon(s0.tx, s0.ty, s0.theading, tr, 0.0) : null);
+          const trPoly1 = s1.trailerPolygon || (s1.tx !== null ? computeBodyPolygon(s1.tx, s1.ty, s1.theading, tr, 0.0) : null);
+          if (trPoly0 && trPoly1) {
+            const hullTr = convexHull8([...trPoly0, ...trPoly1]);
+            subjectPaths.push(hullTr.map(ptToClipper));
+          }
         }
       }
     }
+
+    // 3. Ejecutar la unión booleana exacta (jerárquica por bloques Divide & Conquer para evitar coste O((K*V)^2) en Vatti)
+    const CHUNK_SIZE = 36;
+    const clipper = new ClipperLib.Clipper();
+    clipper.StrictlySimple = true;
+
+    if (subjectPaths.length <= CHUNK_SIZE) {
+      for (let i = 0; i < subjectPaths.length; i++) {
+        clipper.AddPath(subjectPaths[i], ClipperLib.PolyType.ptSubject, true);
+      }
+    } else {
+      for (let c = 0; c < subjectPaths.length; c += CHUNK_SIZE) {
+        const chunkClipper = new ClipperLib.Clipper();
+        const end = Math.min(subjectPaths.length, c + CHUNK_SIZE);
+        for (let k = c; k < end; k++) {
+          chunkClipper.AddPath(subjectPaths[k], ClipperLib.PolyType.ptSubject, true);
+        }
+        const partialPaths = new ClipperLib.Paths();
+        chunkClipper.Execute(
+          ClipperLib.ClipType.ctUnion,
+          partialPaths,
+          ClipperLib.PolyFillType.pftNonZero,
+          ClipperLib.PolyFillType.pftNonZero
+        );
+        clipper.AddPaths(partialPaths, ClipperLib.PolyType.ptSubject, true);
+      }
+    }
+
+    const polyTree = new ClipperLib.PolyTree();
+    clipper.Execute(
+      ClipperLib.ClipType.ctUnion,
+      polyTree,
+      ClipperLib.PolyFillType.pftNonZero,
+      ClipperLib.PolyFillType.pftNonZero
+    );
+    baseExPolygons = ClipperLib.JS.PolyTreeToExPolygons(polyTree);
   }
 
-  // 3. Ejecutar la unión booleana exacta
-  const polyTree = new ClipperLib.PolyTree();
-  clipper.Execute(
-    ClipperLib.ClipType.ctUnion,
-    polyTree,
-    ClipperLib.PolyFillType.pftNonZero,
-    ClipperLib.PolyFillType.pftNonZero
-  );
-  let exPolygons = ClipperLib.JS.PolyTreeToExPolygons(polyTree);
+  let exPolygons = baseExPolygons;
 
   // 4. Si margin > 0, aplicar ClipperOffset con esquinas redondeadas exactas (jtRound - GEOM-04)
   if (margin > 0.0 && exPolygons.length > 0) {
@@ -470,18 +513,45 @@ export function computeSweptEnvelope(states, vehicle, margin = 0.0) {
   const envelopeHoles = exPolygons.length > 0 ? (exPolygons[0].holes || []).map(clipperPathToCoords) : [];
   const envelopePolygons = exPolygons.map((ep) => clipperPathToCoords(ep.outer));
 
-  // 5. Calcular secciones transversales acotadas a la ventana temporal local (GEOM-03)
+  // 5. Calcular secciones transversales acotadas a la ventana temporal local mediante punteros monótonos O(1) (GEOM-03)
   const leftBoundary = [];
   const rightBoundary = [];
   let maxSweptWidthM = 0;
   let maxSweptWidthSection = null;
 
   const sectionStep = Math.max(1, Math.floor(states.length / 800));
+  const maxDistWindow = 22.0;
+  let winStart = 0;
+  let winEnd = 0;
+  const nObbs = obbs.length;
+
   for (let i = 0; i < states.length; i += sectionStep) {
     const s = states[i];
+    const minDistAllowed = s.dist - maxDistWindow;
+    const maxDistAllowed = s.dist + maxDistWindow;
+
+    while (winStart < nObbs && obbs[winStart].dist < minDistAllowed) {
+      winStart++;
+    }
+    if (winEnd < winStart) winEnd = winStart;
+    while (winEnd < nObbs && obbs[winEnd].dist <= maxDistAllowed) {
+      winEnd++;
+    }
+
     const nx = -Math.sin(s.heading);
     const ny = Math.cos(s.heading);
-    const section = computeCrossSectionWidth(s.x, s.y, nx, ny, obbs, 16.0, s.dist, 22.0);
+    const section = computeCrossSectionWidth(
+      s.x,
+      s.y,
+      nx,
+      ny,
+      obbs,
+      16.0,
+      s.dist,
+      maxDistWindow,
+      winStart,
+      winEnd
+    );
     if (section) {
       rightBoundary.push(section.p1);
       leftBoundary.push(section.p2);
@@ -506,7 +576,8 @@ export function computeSweptEnvelope(states, vehicle, margin = 0.0) {
     rightBoundary,
     maxSweptWidthM: Number(maxSweptWidthM.toFixed(3)),
     maxSweptWidthSection,
-    obbs
+    obbs,
+    baseExPolygons
   };
 }
 
@@ -740,9 +811,17 @@ export function buildCompleteSimulationResult(vehicle, maneuver, options = {}) {
   );
   const ghostIntervalM = Math.max(1.0, Number(options.ghostIntervalM || 2.5));
 
-  const envMain = computeSweptEnvelope(states, vehicle, 0.0);
+  const isPreview = Boolean(options.previewMode);
+  const samplingOptions = isPreview
+    ? { maxDeltaThetaRad: (3.0 * Math.PI) / 180, maxDeltaDistM: 1.2, maxIndexGap: 40 }
+    : undefined;
+
+  const envMain = computeSweptEnvelope(states, vehicle, 0.0, { samplingOptions });
   const envMargin = safetyMargin > 0
-    ? computeSweptEnvelope(states, vehicle, safetyMargin)
+    ? computeSweptEnvelope(states, vehicle, safetyMargin, {
+        precomputedBaseExPolygons: envMain.baseExPolygons,
+        samplingOptions
+      })
     : null;
 
   const dimensions = computeKeyDimensions(states, envMain.obbs, envMain.maxSweptWidthSection);

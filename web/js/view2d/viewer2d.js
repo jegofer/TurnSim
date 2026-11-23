@@ -286,7 +286,7 @@ export class Viewer2D {
       if (this.draggedWaypointIndex >= 0 && this.waypoints[this.draggedWaypointIndex]) {
         this.waypoints[this.draggedWaypointIndex] = [Number(wx.toFixed(2)), Number(wy.toFixed(2))];
         if (typeof this.onWaypointsChange === "function") {
-          this.onWaypointsChange(this.waypoints);
+          this.onWaypointsChange(this.waypoints, { isDragging: true });
         }
         this.render();
         return;
@@ -344,6 +344,9 @@ export class Viewer2D {
       }
       if (this.draggedWaypointIndex >= 0) {
         this.draggedWaypointIndex = -1;
+        if (typeof this.onWaypointsChange === "function") {
+          this.onWaypointsChange(this.waypoints, { isDragging: false });
+        }
         if (typeof this.onWaypointDragEnd === "function") {
           this.onWaypointDragEnd(this.waypoints);
         }

@@ -64,37 +64,41 @@ export function computeHitchPoint(x, y, heading, hitchOffset) {
  * Orden de vértices (sentido horario/antihorario cerrado):
  * 0: trasero derecho, 1: trasero izquierdo, 2: delantero izquierdo, 3: delantero derecho.
  */
-export function computeBodyPolygon(rx, ry, heading, segment, safetyMargin = 0.0) {
+export function computeBodyPolygon(rx, ry, heading, segment, safetyMargin = 0.0, preCosH = null, preSinH = null) {
   const lFront = segment.wheelbase + segment.frontOverhang + safetyMargin;
   const lRear = segment.rearOverhang + safetyMargin;
   const halfW = segment.width / 2 + safetyMargin;
-  const cosH = Math.cos(heading);
-  const sinH = Math.sin(heading);
+  const cosH = preCosH !== null ? preCosH : Math.cos(heading);
+  const sinH = preSinH !== null ? preSinH : Math.sin(heading);
 
-  const localCorners = [
-    [-lRear, -halfW], // Trasero derecho
-    [-lRear, +halfW], // Trasero izquierdo
-    [+lFront, +halfW], // Delantero izquierdo
-    [+lFront, -halfW]  // Delantero derecho
+  const rCos = rx - lRear * cosH;
+  const rSin = ry - lRear * sinH;
+  const fCos = rx + lFront * cosH;
+  const fSin = ry + lFront * sinH;
+  const wSin = halfW * sinH;
+  const wCos = halfW * cosH;
+
+  return [
+    [rCos + wSin, rSin - wCos], // 0: Trasero derecho
+    [rCos - wSin, rSin + wCos], // 1: Trasero izquierdo
+    [fCos - wSin, fSin + wCos], // 2: Delantero izquierdo
+    [fCos + wSin, fSin - wCos]  // 3: Delantero derecho
   ];
-
-  return localCorners.map(([lx, ly]) => [
-    rx + lx * cosH - ly * sinH,
-    ry + lx * sinH + ly * cosH
-  ]);
 }
 
 /**
  * Calcula los extremos izquierdo y derecho de un eje centrado en (ax, ay) con orientación heading.
  */
-export function computeAxleEndpoints(ax, ay, heading, width) {
+export function computeAxleEndpoints(ax, ay, heading, width, preCosH = null, preSinH = null) {
   const halfW = width / 2;
-  const cosH = Math.cos(heading);
-  const sinH = Math.sin(heading);
+  const cosH = preCosH !== null ? preCosH : Math.cos(heading);
+  const sinH = preSinH !== null ? preSinH : Math.sin(heading);
+  const wSin = halfW * sinH;
+  const wCos = halfW * cosH;
   return {
     center: [ax, ay],
-    left: [ax - halfW * sinH, ay + halfW * cosH],
-    right: [ax + halfW * sinH, ay - halfW * cosH]
+    left: [ax - wSin, ay + wCos],
+    right: [ax + wSin, ay - wCos]
   };
 }
 
@@ -110,13 +114,15 @@ export function computeAxleEndpoints(ax, ay, heading, width) {
 export function updateTrailerRK4(hx0, hy0, hx1, hy1, trailerHeading0, trailerWheelbase) {
   const dhx = hx1 - hx0;
   const dhy = hy1 - hy0;
+  const invL = 1.0 / trailerWheelbase;
 
-  const deriv = (th) => (-dhx * Math.sin(th) + dhy * Math.cos(th)) / trailerWheelbase;
-
-  const k1 = deriv(trailerHeading0);
-  const k2 = deriv(trailerHeading0 + 0.5 * k1);
-  const k3 = deriv(trailerHeading0 + 0.5 * k2);
-  const k4 = deriv(trailerHeading0 + k3);
+  const k1 = (-dhx * Math.sin(trailerHeading0) + dhy * Math.cos(trailerHeading0)) * invL;
+  const th2 = trailerHeading0 + 0.5 * k1;
+  const k2 = (-dhx * Math.sin(th2) + dhy * Math.cos(th2)) * invL;
+  const th3 = trailerHeading0 + 0.5 * k2;
+  const k3 = (-dhx * Math.sin(th3) + dhy * Math.cos(th3)) * invL;
+  const th4 = trailerHeading0 + k3;
+  const k4 = (-dhx * Math.sin(th4) + dhy * Math.cos(th4)) * invL;
 
   const newHeading = normalizeAngle(trailerHeading0 + (k1 + 2 * k2 + 2 * k3 + k4) / 6);
   const newX = hx1 - trailerWheelbase * Math.cos(newHeading);
@@ -136,26 +142,30 @@ export function updateTrailerRK4(hx0, hy0, hx1, hy1, trailerHeading0, trailerWhe
 export function updateTrailerArcRK4(hx0, hy0, cx, cy, dHeading, trailerHeading0, trailerWheelbase) {
   const rx0 = hx0 - cx;
   const ry0 = hy0 - cy;
+  const scale = dHeading / trailerWheelbase;
 
-  const deriv = (tau, th) => {
-    const angle = tau * dHeading;
-    const cosA = Math.cos(angle);
-    const sinA = Math.sin(angle);
-    const rx = rx0 * cosA - ry0 * sinA;
-    const ry = rx0 * sinA + ry0 * cosA;
-    return (dHeading / trailerWheelbase) * (ry * Math.sin(th) + rx * Math.cos(th));
-  };
+  const halfAngle = 0.5 * dHeading;
+  const cosHalf = Math.cos(halfAngle);
+  const sinHalf = Math.sin(halfAngle);
+  const rxHalf = rx0 * cosHalf - ry0 * sinHalf;
+  const ryHalf = rx0 * sinHalf + ry0 * cosHalf;
 
-  const k1 = deriv(0.0, trailerHeading0);
-  const k2 = deriv(0.5, trailerHeading0 + 0.5 * k1);
-  const k3 = deriv(0.5, trailerHeading0 + 0.5 * k2);
-  const k4 = deriv(1.0, trailerHeading0 + k3);
-
-  const newHeading = normalizeAngle(trailerHeading0 + (k1 + 2 * k2 + 2 * k3 + k4) / 6);
   const cosD = Math.cos(dHeading);
   const sinD = Math.sin(dHeading);
-  const hx1 = cx + rx0 * cosD - ry0 * sinD;
-  const hy1 = cy + rx0 * sinD + ry0 * cosD;
+  const rx1 = rx0 * cosD - ry0 * sinD;
+  const ry1 = rx0 * sinD + ry0 * cosD;
+
+  const k1 = scale * (ry0 * Math.sin(trailerHeading0) + rx0 * Math.cos(trailerHeading0));
+  const th2 = trailerHeading0 + 0.5 * k1;
+  const k2 = scale * (ryHalf * Math.sin(th2) + rxHalf * Math.cos(th2));
+  const th3 = trailerHeading0 + 0.5 * k2;
+  const k3 = scale * (ryHalf * Math.sin(th3) + rxHalf * Math.cos(th3));
+  const th4 = trailerHeading0 + k3;
+  const k4 = scale * (ry1 * Math.sin(th4) + rx1 * Math.cos(th4));
+
+  const newHeading = normalizeAngle(trailerHeading0 + (k1 + 2 * k2 + 2 * k3 + k4) / 6);
+  const hx1 = cx + rx1;
+  const hy1 = cy + ry1;
 
   const newX = hx1 - trailerWheelbase * Math.cos(newHeading);
   const newY = hy1 - trailerWheelbase * Math.sin(newHeading);
@@ -208,10 +218,10 @@ function buildDetailedState({
   const trackFront = tv.trackWidthFront || tv.width;
   const trackRear = tv.trackWidthRear || tv.width;
 
-  const tractorFrontAxle = computeAxleEndpoints(frontAxleX, frontAxleY, heading, trackFront);
-  const tractorRearAxle = computeAxleEndpoints(x, y, heading, trackRear);
-  const tractorPoly = computeBodyPolygon(x, y, heading, tv, 0.0);
-  const tractorMarginPoly = safetyMargin > 0 ? computeBodyPolygon(x, y, heading, tv, safetyMargin) : tractorPoly;
+  const tractorFrontAxle = computeAxleEndpoints(frontAxleX, frontAxleY, heading, trackFront, cosH, sinH);
+  const tractorRearAxle = computeAxleEndpoints(x, y, heading, trackRear, cosH, sinH);
+  const tractorPoly = computeBodyPolygon(x, y, heading, tv, 0.0, cosH, sinH);
+  const tractorMarginPoly = safetyMargin > 0 ? computeBodyPolygon(x, y, heading, tv, safetyMargin, cosH, sinH) : tractorPoly;
 
   let trailerPoly = null;
   let trailerMarginPoly = null;
@@ -229,17 +239,17 @@ function buildDetailedState({
       const parentH = j === 0 ? heading : trailersData[j - 1].heading;
       const articRad = normalizeAngle(parentH - th);
       const articDeg = (articRad * 180) / Math.PI;
-      const poly = computeBodyPolygon(tX, tY, th, trDef, 0.0);
-      const mPoly = safetyMargin > 0 ? computeBodyPolygon(tX, tY, th, trDef, safetyMargin) : poly;
       const cosT = Math.cos(th);
       const sinT = Math.sin(th);
+      const poly = computeBodyPolygon(tX, tY, th, trDef, 0.0, cosT, sinT);
+      const mPoly = safetyMargin > 0 ? computeBodyPolygon(tX, tY, th, trDef, safetyMargin, cosT, sinT) : poly;
       const trTrack = trDef.trackWidth || trDef.width || 2.55;
       const spacing = trDef.axleSpacing || 1.31;
       const offsets = trDef.axleCount === 3 ? [spacing, 0, -spacing] : trDef.axleCount === 2 ? [spacing / 2, -spacing / 2] : [0];
       const axles = offsets.map((off) => {
         const ax = tX + off * cosT;
         const ay = tY + off * sinT;
-        return computeAxleEndpoints(ax, ay, th, trTrack);
+        return computeAxleEndpoints(ax, ay, th, trTrack, cosT, sinT);
       });
 
       trailers.push({
@@ -271,11 +281,11 @@ function buildDetailedState({
     articulationAngleRad = primary.articulationAngleRad;
   } else if (tr && tx !== null && ty !== null && trailerHeading !== null) {
     articulationAngleRad = normalizeAngle(heading - trailerHeading);
-    trailerPoly = computeBodyPolygon(tx, ty, trailerHeading, tr, 0.0);
-    trailerMarginPoly = safetyMargin > 0 ? computeBodyPolygon(tx, ty, trailerHeading, tr, safetyMargin) : trailerPoly;
-
     const cosT = Math.cos(trailerHeading);
     const sinT = Math.sin(trailerHeading);
+    trailerPoly = computeBodyPolygon(tx, ty, trailerHeading, tr, 0.0, cosT, sinT);
+    trailerMarginPoly = safetyMargin > 0 ? computeBodyPolygon(tx, ty, trailerHeading, tr, safetyMargin, cosT, sinT) : trailerPoly;
+
     const trTrack = tr.trackWidth || tr.width;
     const spacing = tr.axleSpacing || 1.31;
     const offsets = tr.axleCount === 3 ? [spacing, 0, -spacing] : [0];
@@ -283,7 +293,7 @@ function buildDetailedState({
     trailerAxles = offsets.map((off) => {
       const ax = tx + off * cosT;
       const ay = ty + off * sinT;
-      return computeAxleEndpoints(ax, ay, trailerHeading, trTrack);
+      return computeAxleEndpoints(ax, ay, trailerHeading, trTrack, cosT, sinT);
     });
 
     trailers.push({

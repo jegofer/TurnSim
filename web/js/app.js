@@ -162,14 +162,15 @@ export class SweptPathApp {
     };
 
     // Callbacks para trazado y edición de waypoints interactivos (UX-04)
-    this.viewer2D.onWaypointsChange = (pts) => {
+    this.viewer2D.onWaypointsChange = (pts, meta = {}) => {
+      const isDragging = Boolean(meta && meta.isDragging);
       const txtEl = document.getElementById("inp-waypoints-text");
       if (!pts || pts.length === 0) {
         if (txtEl) txtEl.value = "";
         this.maneuver.segments = [];
         this._populateManeuverInputs();
         this._renderSegmentsListUI();
-        this.scheduleRecompute(60, false);
+        this.scheduleRecompute(40, false);
         return;
       }
       if (txtEl) {
@@ -194,7 +195,7 @@ export class SweptPathApp {
         this.maneuver.segments = [];
         this._populateManeuverInputs();
         this._renderSegmentsListUI();
-        this.scheduleRecompute(60, false);
+        this.scheduleRecompute(40, false);
         return;
       }
 
@@ -207,11 +208,15 @@ export class SweptPathApp {
         ...built.startPose
       };
       this.maneuver.segments = built.segments;
-      this._populateManeuverInputs();
-      this._renderSegmentsListUI();
-      this.history.pushState(this.getSnapshot());
-      this._updateUndoRedoButtonsUI();
-      this.scheduleRecompute(60, false);
+      if (!isDragging) {
+        this._populateManeuverInputs();
+        this._renderSegmentsListUI();
+        this.history.pushState(this.getSnapshot());
+        this._updateUndoRedoButtonsUI();
+        this.scheduleRecompute(16, false, false);
+      } else {
+        this.scheduleRecompute(24, false, true);
+      }
     };
 
     this._initUI();
@@ -238,14 +243,14 @@ export class SweptPathApp {
     }
   }
 
-  scheduleRecompute(delayMs = 120, fitCamera = false) {
+  scheduleRecompute(delayMs = 120, fitCamera = false, previewMode = false) {
     if (this._recomputeTimer) clearTimeout(this._recomputeTimer);
     if (this.maneuver && this.maneuver.segments && this.maneuver.segments.length > 0) {
       this._setComputingStatus(true);
     }
     this._recomputeTimer = setTimeout(() => {
       this._recomputeTimer = null;
-      this.recomputeAll(fitCamera);
+      this.recomputeAll(fitCamera, previewMode);
     }, delayMs);
   }
 
@@ -2268,9 +2273,11 @@ export class SweptPathApp {
     );
   }
 
-  recomputeAll(fitCamera = false) {
+  recomputeAll(fitCamera = false, previewMode = false) {
     this._updateVehicleSummaryAndValidationUI();
-    this._scheduleAutosave();
+    if (!previewMode) {
+      this._scheduleAutosave();
+    }
 
     // Si no hay tramos definidos en la maniobra
     if (!this.maneuver || !this.maneuver.segments || this.maneuver.segments.length === 0) {
@@ -2376,15 +2383,26 @@ export class SweptPathApp {
     }
 
     this._setComputingStatus(true);
+    const simOpts = previewMode
+      ? {
+          ...this.discretization,
+          straightStepM: Math.max(0.15, Number(this.discretization?.straightStepM || 0.05)),
+          arcStepDeg: Math.max(1.5, Number(this.discretization?.arcStepDeg || 0.5)),
+          steeringReferencePoint: this.maneuver.steeringReferencePoint || "rear_axle",
+          safetyMarginM: this.safetyMarginM,
+          previewMode: true
+        }
+      : {
+          ...this.discretization,
+          steeringReferencePoint: this.maneuver.steeringReferencePoint || "rear_axle",
+          safetyMarginM: this.safetyMarginM,
+          previewMode: false
+        };
     this.workerClient.recomputeAll(
       {
         vehicle: this.vehicle,
         maneuver: this.maneuver,
-        options: {
-          ...this.discretization,
-          steeringReferencePoint: this.maneuver.steeringReferencePoint || "rear_axle",
-          safetyMarginM: this.safetyMarginM
-        },
+        options: simOpts,
         obstacles: this.obstacles,
         safetyMarginM: this.safetyMarginM
       },

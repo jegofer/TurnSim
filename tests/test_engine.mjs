@@ -1883,6 +1883,57 @@ let simTrackingForRateTest = null;
   );
 }
 
+// -----------------------------------------------------------------------------
+// TEST-45: Aceleración del cálculo de envolvente (Divide & Conquer + reutilización
+//          de unión base + ventana deslizante O(1)) e invarianza de precisión
+// -----------------------------------------------------------------------------
+{
+  const { VEHICLE_CATALOG } = await import("../web/js/models/vehicles.js");
+  const veh = VEHICLE_CATALOG.spain_camion_articulado_t;
+  const longManeuver = {
+    startPose: { x: -40, y: -10, headingDeg: 0, initialArticulationDeg: 0 },
+    segments: [
+      { type: "straight", length: 25, direction: 1 },
+      { type: "arc", radius: 14, angle: 80, direction: 1 },
+      { type: "arc", radius: 15, angle: -160, direction: 1 },
+      { type: "arc", radius: 14, angle: 80, direction: 1 },
+      { type: "straight", length: 30, direction: 1 }
+    ]
+  };
+  const obstacles = PRESET_SCENARIOS.roundabout_exit.obstacles;
+
+  const t0 = performance.now();
+  const fullRes = buildCompleteSimulationResult(veh, longManeuver, {
+    straightStepM: 0.05,
+    arcStepDeg: 0.5,
+    safetyMarginM: 0.30
+  });
+  const colRes = evaluateObstacleInterferences(fullRes, obstacles, 0.30);
+  const t1 = performance.now();
+
+  const tPrev0 = performance.now();
+  const prevRes = buildCompleteSimulationResult(veh, longManeuver, {
+    straightStepM: 0.15,
+    arcStepDeg: 1.5,
+    safetyMarginM: 0.30,
+    previewMode: true
+  });
+  const tPrev1 = performance.now();
+
+  const fullElapsedMs = t1 - t0;
+  const previewElapsedMs = tPrev1 - tPrev0;
+  const widthConsistent = Math.abs(fullRes.summary.maxSweptWidthM - 5.009) <= 0.002;
+  const previewConsistent = Math.abs(prevRes.summary.maxSweptWidthM - fullRes.summary.maxSweptWidthM) <= 0.02;
+  const hasBothEnvelopes = fullRes.envelope.length > 100 && fullRes.marginEnvelope && fullRes.marginEnvelope.length > 100;
+
+  assertCondition(
+    "TEST-45",
+    `Aceleración del cálculo de trayectoria, envolvente (Divide & Conquer + offset reutilizado) y modo preview`,
+    widthConsistent && previewConsistent && hasBothEnvelopes && fullElapsedMs < 350,
+    `full=${fullElapsedMs.toFixed(1)} ms, preview=${previewElapsedMs.toFixed(1)} ms, maxW=${fullRes.summary.maxSweptWidthM} m (preview=${prevRes.summary.maxSweptWidthM} m), d_min=${colRes.minClearanceM} m`
+  );
+}
+
 console.log("\n==================================================================");
 console.log(` RESUMEN DE VERIFICACIÓN: ${passed} superadas, ${failed} fallidas`);
 console.log("==================================================================");
