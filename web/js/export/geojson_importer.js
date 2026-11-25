@@ -216,36 +216,148 @@ export function isGeographicCoordinates(x, y) {
 }
 
 /**
- * Convierte un FeatureCollection o Feature GeoJSON en un escenario completo de TurnSim,
- * proyectando las geometrías al sistema métrico local y georreferenciando automáticamente
- * la capa de ortofotos PNOA del IGN.
- *
- * @param {string|object} geojsonInput
- * @param {object} options Opciones de configuración
- * @returns {object} Escenario con maneuver, obstacles, backgroundEntities, bounds, geoCenter y pnoaConfig
+ * Construye una configuración de ortofoto PNOA (IGN) alineada exactamente con el
+ * origen local UTM (`originOffset`) de un plano DXF en coordenadas ETRS89 UTM (España).
  */
-export function buildScenarioFromGeoJSON(geojsonInput, options = {}) {
-  const features = parseGeoJSON(geojsonInput);
-  if (features.length === 0) {
-    throw new Error("El archivo GeoJSON no contiene ninguna entidad geométrica procesable.");
+export function buildPnoaConfigFromUtmOrigin(originOffset, utmZone = 30) {
+  if (!originOffset || !Number.isFinite(originOffset.x) || !Number.isFinite(originOffset.y)) {
+    return null;
   }
+  const geo = utmToWgs84(originOffset.x, originOffset.y, utmZone, true);
+  return {
+    enabled: true,
+    centerLat: geo.lat,
+    centerLon: geo.lon,
+    utmZone,
+    anchorWorldX: 0.0,
+    anchorWorldY: 0.0,
+    opacity: 0.8
+  };
+}
 
-  // 1. Detección del sistema de coordenadas y cálculo del bounding box global
-  let minLon = Infinity;
-  let maxLon = -Infinity;
-  let minLat = Infinity;
-  let maxLat = -Infinity;
+/**
+ * Inspecciona un archivo GeoJSON para mostrar resumen de geometrías, sistema de coordenadas
+ * y rol sugerido (ejes de referencia, obstáculos, bordes, fondo o detección automática).
+ */
+export function inspectGeoJSONFile(geojsonInput, fileName = "archivo.geojson") {
+  const features = parseGeoJSON(geojsonInput);
+  const geomCounts = {};
   let isUtm = false;
+  let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
 
   function registerCoord(c) {
     if (!Array.isArray(c) || c.length < 2) return;
     const x = Number(c[0]);
     const y = Number(c[1]);
     if (!Number.isFinite(x) || !Number.isFinite(y)) return;
+    if (!isGeographicCoordinates(x, y)) isUtm = true;
+    if (x < minX) minX = x;
+    if (x > maxX) maxX = x;
+    if (y < minY) minY = y;
+    if (y > maxY) maxY = y;
+  }
 
-    if (!isGeographicCoordinates(x, y)) {
-      isUtm = true;
+  function scanGeom(geom) {
+    if (!geom || !geom.coordinates) return;
+    const t = geom.type;
+    geomCounts[t] = (geomCounts[t] || 0) + 1;
+    const c = geom.coordinates;
+    if (t === "Point") registerCoord(c);
+    else if (t === "LineString" || t === "MultiPoint") {
+      for (const pt of c) registerCoord(pt);
+    } else if (t === "Polygon" || t === "MultiLineString") {
+      for (const ring of c) {
+        if (Array.isArray(ring)) for (const pt of ring) registerCoord(pt);
+      }
+    } else if (t === "MultiPolygon") {
+      for (const poly of c) {
+        if (Array.isArray(poly)) {
+          for (const ring of poly) {
+            if (Array.isArray(ring)) for (const pt of ring) registerCoord(pt);
+          }
+        }
+      }
     }
+  }
+
+  for (const f of features) {
+    scanGeom(f.geometry);
+  }
+
+  // Sugerir rol por nombre de archivo y tipos geométricos predominantes
+  const normFile = normalizeName(fileName.replace(/\.[^.]+$/, ""));
+  const hasLines = (geomCounts.LineString || 0) + (geomCounts.MultiLineString || 0) > 0;
+  const hasPolys = (geomCounts.Polygon || 0) + (geomCounts.MultiPolygon || 0) > 0;
+  const hasPoints = (geomCounts.Point || 0) + (geomCounts.MultiPoint || 0) > 0;
+
+  let suggestedRole = "auto";
+  if (/OBSTAC|ENVOLV|EDIFIC|MURO|VALLA|BARRER|BUILD|OBST/.test(normFile)) {
+    suggestedRole = "obstacles";
+  } else if (/EJE|VIAL|AXIS|CENTERLINE|EJE_VIAL|CARRETERA|ROAD_AX/.test(normFile) && hasLines && !hasPolys) {
+    suggestedRole = "reference_axes";
+  } else if (/BORDILL|BORDE|ACERA|CURB|EDGE/.test(normFile)) {
+    suggestedRole = "boundaries";
+  } else if (/RESTRING|PROHIB|EXCLUID|PEATON/.test(normFile)) {
+    suggestedRole = "restricted";
+  } else if (/FONDO|CONTEXT|PARCELA|BASE|BACKGR/.test(normFile)) {
+    suggestedRole = "background";
+  } else {
+    // Si tiene propiedades explícitas conocidas, usar 'auto'; si no, inferir por geometría
+    const hasLayerHints = features.some((f) => {
+      const p = f.properties || {};
+      return Boolean(p.layer || p.capa || p.tipo || p.type || p.role || p.isTrajectory);
+    });
+    if (!hasLayerHints) {
+      if (hasLines && !hasPolys && !hasPoints) suggestedRole = "reference_axes";
+      else if (hasPolys) suggestedRole = "obstacles";
+    }
+  }
+
+  return {
+    fileName,
+    features,
+    featureCount: features.length,
+    geomCounts,
+    isUtm,
+    rawBounds: Number.isFinite(minX) ? { minX, minY, maxX, maxY } : null,
+    suggestedRole
+  };
+}
+
+/**
+ * Construye un escenario unificado a partir de uno o varios archivos GeoJSON,
+ * proyectando todas las entidades bajo un único origen común (o reutilizando
+ * `options.sharedOrigin` al añadir capas a una escena georreferenciada activa).
+ *
+ * @param {Array<{ fileName?: string, features?: Array, geojson?: string|object, role?: string }>} fileEntries
+ * @param {object} options { utmZone, sharedOrigin, direction, agreementRadius }
+ */
+export function buildScenarioFromGeoJSONFiles(fileEntries, options = {}) {
+  if (!Array.isArray(fileEntries) || fileEntries.length === 0) {
+    throw new Error("Debe proporcionar al menos un archivo GeoJSON válido.");
+  }
+
+  const normalizedEntries = fileEntries.map((entry, idx) => {
+    const feats = Array.isArray(entry.features)
+      ? entry.features
+      : parseGeoJSON(entry.geojson);
+    return {
+      fileName: entry.fileName || `capa_${idx + 1}.geojson`,
+      features: feats,
+      role: entry.role || "auto"
+    };
+  });
+
+  // 1. Detección global de CRS y bounding box conjunto (si no hay sharedOrigin previo)
+  let minLon = Infinity, maxLon = -Infinity, minLat = Infinity, maxLat = -Infinity;
+  let detectedUtm = false;
+
+  function registerCoord(c) {
+    if (!Array.isArray(c) || c.length < 2) return;
+    const x = Number(c[0]);
+    const y = Number(c[1]);
+    if (!Number.isFinite(x) || !Number.isFinite(y)) return;
+    if (!isGeographicCoordinates(x, y)) detectedUtm = true;
     if (x < minLon) minLon = x;
     if (x > maxLon) maxLon = x;
     if (y < minLat) minLat = y;
@@ -256,73 +368,98 @@ export function buildScenarioFromGeoJSON(geojsonInput, options = {}) {
     if (!geom || !geom.coordinates) return;
     const c = geom.coordinates;
     const type = geom.type;
-
     if (type === "Point") {
       registerCoord(c);
     } else if (type === "LineString" || type === "MultiPoint") {
       for (const pt of c) registerCoord(pt);
     } else if (type === "Polygon" || type === "MultiLineString") {
       for (const ring of c) {
-        if (Array.isArray(ring)) {
-          for (const pt of ring) registerCoord(pt);
-        }
+        if (Array.isArray(ring)) for (const pt of ring) registerCoord(pt);
       }
     } else if (type === "MultiPolygon") {
       for (const poly of c) {
         if (Array.isArray(poly)) {
           for (const ring of poly) {
-            if (Array.isArray(ring)) {
-              for (const pt of ring) registerCoord(pt);
-            }
+            if (Array.isArray(ring)) for (const pt of ring) registerCoord(pt);
           }
         }
       }
     }
   }
 
-  for (const feat of features) {
-    scanCoords(feat.geometry);
-  }
-
-  if (!Number.isFinite(minLon) || !Number.isFinite(maxLon)) {
-    throw new Error("No se encontraron coordenadas válidas en las geometrías del GeoJSON.");
-  }
-
-  let centerLon = 0.5 * (minLon + maxLon);
-  let centerLat = 0.5 * (minLat + maxLat);
-  let utmZone = options.utmZone || 30;
-
-  // Si las coordenadas venían en UTM, calcular latitud y longitud WGS84 para el PNOA
-  if (isUtm) {
-    const geoCenter = utmToWgs84(centerLon, centerLat, utmZone, true);
-    centerLon = geoCenter.lon;
-    centerLat = geoCenter.lat;
-  }
-
-  // 2. Función de proyección métrica local normalizada
-  const toLocalMeters = (coord) => {
-    let rawX = Number(coord[0]);
-    let rawY = Number(coord[1]);
-    if (isUtm) {
-      // Coordenadas métricas UTM directas centradas en el centroide
-      const cx = 0.5 * (minLon + maxLon);
-      const cy = 0.5 * (minLat + maxLat);
-      return [Number((rawX - cx).toFixed(4)), Number((rawY - cy).toFixed(4))];
+  let totalFeatures = 0;
+  for (const entry of normalizedEntries) {
+    for (const feat of entry.features) {
+      totalFeatures++;
+      scanCoords(feat.geometry);
     }
+  }
+
+  if (totalFeatures === 0 || !Number.isFinite(minLon) || !Number.isFinite(maxLon)) {
+    throw new Error("No se encontraron coordenadas válidas en las geometrías GeoJSON.");
+  }
+
+  const utmZone = Number(options.utmZone || options.sharedOrigin?.utmZone || 30);
+  let sharedOrigin = options.sharedOrigin ? { ...options.sharedOrigin } : null;
+
+  if (!sharedOrigin) {
+    if (detectedUtm) {
+      const utmCenterX = 0.5 * (minLon + maxLon);
+      const utmCenterY = 0.5 * (minLat + maxLat);
+      const geoCenter = utmToWgs84(utmCenterX, utmCenterY, utmZone, true);
+      sharedOrigin = {
+        isUtm: true,
+        utmZone,
+        utmCenterX,
+        utmCenterY,
+        centerLon: geoCenter.lon,
+        centerLat: geoCenter.lat
+      };
+    } else {
+      sharedOrigin = {
+        isUtm: false,
+        utmZone,
+        utmCenterX: null,
+        utmCenterY: null,
+        centerLon: Number((0.5 * (minLon + maxLon)).toFixed(7)),
+        centerLat: Number((0.5 * (minLat + maxLat)).toFixed(7))
+      };
+    }
+  }
+
+  const centerLon = sharedOrigin.centerLon;
+  const centerLat = sharedOrigin.centerLat;
+
+  // 2. Proyección métrica local unificada (admite mezcla WGS84 y UTM contra el mismo origen)
+  const toLocalMeters = (coord) => {
+    const rawX = Number(coord[0]);
+    const rawY = Number(coord[1]);
+    const coordIsUtm = !isGeographicCoordinates(rawX, rawY);
+
+    if (coordIsUtm) {
+      if (sharedOrigin.isUtm && Number.isFinite(sharedOrigin.utmCenterX) && Number.isFinite(sharedOrigin.utmCenterY)) {
+        return [
+          Number((rawX - sharedOrigin.utmCenterX).toFixed(4)),
+          Number((rawY - sharedOrigin.utmCenterY).toFixed(4))
+        ];
+      }
+      // Si el origen es WGS84 pero esta entidad viene en UTM, convertir primero a WGS84
+      const wgs = utmToWgs84(rawX, rawY, utmZone, true);
+      return projectWgs84ToLocalMeters(wgs.lon, wgs.lat, centerLon, centerLat);
+    }
+
     return projectWgs84ToLocalMeters(rawX, rawY, centerLon, centerLat);
   };
 
   // 3. Extracción de geometrías clasificadas
   const obstacles = [];
+  const referenceAxes = [];
   const backgroundEntities = [];
   let trajectoryEntity = null;
   let obsCounter = 1;
+  let axisCounter = 1;
 
-  let localMinX = Infinity;
-  let localMaxX = -Infinity;
-  let localMinY = Infinity;
-  let localMaxY = -Infinity;
-
+  let localMinX = Infinity, localMaxX = -Infinity, localMinY = Infinity, localMaxY = -Infinity;
   function updateLocalBounds(pts) {
     for (const [x, y] of pts) {
       if (x < localMinX) localMinX = x;
@@ -332,205 +469,316 @@ export function buildScenarioFromGeoJSON(geojsonInput, options = {}) {
     }
   }
 
-  // Evaluar coincidencia de capa o propiedades con patrones
   function matchesPattern(text, patterns) {
     const norm = normalizeName(text);
+    if (!norm) return false;
     return patterns.some((p) => norm.includes(p) || p.includes(norm));
   }
 
-  for (const feat of features) {
-    const props = feat.properties || {};
-    const geom = feat.geometry;
-    if (!geom) continue;
+  for (const entry of normalizedEntries) {
+    const forcedRole = entry.role || "auto";
+    const baseLayerName = entry.fileName.replace(/\.[^.]+$/, "");
 
-    const layerTag = props.layer || props.capa || props.tipo || props.type || props.name || props.highway || "";
-    const nameTag = props.name || props.nombre || props.id || `Elemento #${obsCounter}`;
+    for (const feat of entry.features) {
+      const props = feat.properties || {};
+      const geom = feat.geometry;
+      if (!geom) continue;
 
-    const isExplicitTrajectory =
-      matchesPattern(layerTag, GEOJSON_LAYER_PATTERNS.TRAJECTORY) ||
-      matchesPattern(props.role || "", GEOJSON_LAYER_PATTERNS.TRAJECTORY) ||
-      props.isTrajectory === true;
+      const layerTag = props.layer || props.capa || props.tipo || props.type || props.name || props.highway || baseLayerName;
+      const nameTag = props.name || props.nombre || props.id || `Elemento #${obsCounter}`;
+      const geomType = geom.type;
 
-    const isCurbOrEdge =
-      matchesPattern(layerTag, GEOJSON_LAYER_PATTERNS.CURBS_AND_EDGES);
+      // Modo de rol forzado por archivo (ideal para flujos con 2 archivos: ejes + obstáculos)
+      if (forcedRole !== "auto") {
+        if (forcedRole === "reference_axes") {
+          const lines = geomType === "LineString"
+            ? [geom.coordinates]
+            : (geomType === "MultiLineString" ? geom.coordinates : []);
+          for (const line of lines) {
+            const vertices = line.map(toLocalMeters);
+            if (vertices.length < 2) continue;
+            updateLocalBounds(vertices);
+            referenceAxes.push({
+              id: `geo_axis_${axisCounter}`,
+              name: props.name || props.nombre || `Eje vial (${baseLayerName} #${axisCounter})`,
+              layer: baseLayerName,
+              vertices,
+              closed: false
+            });
+            axisCounter++;
+          }
+          continue;
+        }
 
-    const isIsland =
-      matchesPattern(layerTag, GEOJSON_LAYER_PATTERNS.ISLANDS);
+        if (forcedRole === "obstacles" || forcedRole === "boundaries" || forcedRole === "restricted") {
+          const obsType = forcedRole === "boundaries"
+            ? "road_edge"
+            : (forcedRole === "restricted" ? "restricted_zone" : "building");
+          const obsColor = forcedRole === "boundaries"
+            ? "#f59e0b"
+            : (forcedRole === "restricted" ? "#eab308" : "#ef4444");
 
-    const isBuildingOrBarrier =
-      matchesPattern(layerTag, GEOJSON_LAYER_PATTERNS.BUILDINGS_AND_BARRIERS);
+          if (geomType === "LineString" || geomType === "MultiLineString") {
+            const lines = geomType === "LineString" ? [geom.coordinates] : geom.coordinates;
+            for (const line of lines) {
+              const vertices = line.map(toLocalMeters);
+              if (vertices.length < 2) continue;
+              updateLocalBounds(vertices);
+              obstacles.push({
+                id: `geo_obs_${obsCounter}`,
+                name: props.name || props.nombre || `Obstáculo GIS (${baseLayerName} #${obsCounter})`,
+                type: obsType,
+                shape: "polyline",
+                vertices,
+                color: props.color || obsColor,
+                enabled: true
+              });
+              obsCounter++;
+            }
+          } else if (geomType === "Polygon" || geomType === "MultiPolygon") {
+            const polys = geomType === "Polygon" ? [geom.coordinates] : geom.coordinates;
+            for (const poly of polys) {
+              const exterior = poly[0]?.map(toLocalMeters) || [];
+              if (exterior.length < 3) continue;
+              updateLocalBounds(exterior);
+              obstacles.push({
+                id: `geo_obs_${obsCounter}`,
+                name: props.name || props.nombre || `Obstáculo GIS (${baseLayerName} #${obsCounter})`,
+                type: obsType,
+                shape: "polygon",
+                vertices: exterior,
+                color: props.color || obsColor,
+                heightM: props.heightM || (forcedRole === "obstacles" ? 3.5 : 0.25),
+                enabled: true
+              });
+              obsCounter++;
+            }
+          } else if (geomType === "Point") {
+            const [px, py] = toLocalMeters(geom.coordinates);
+            updateLocalBounds([[px, py]]);
+            obstacles.push({
+              id: `geo_pt_${obsCounter}`,
+              name: props.name || props.nombre || `Pilar / Punto (${baseLayerName} #${obsCounter})`,
+              type: "column",
+              shape: "circle",
+              x: px,
+              y: py,
+              radius: Number(props.radius || 0.35),
+              heightM: Number(props.heightM || 3.0),
+              color: props.color || "#f97316",
+              enabled: true
+            });
+            obsCounter++;
+          }
+          continue;
+        }
 
-    const isRestricted =
-      matchesPattern(layerTag, GEOJSON_LAYER_PATTERNS.RESTRICTED_ZONING);
-
-    const geomType = geom.type;
-
-    // Procesar LineString
-    if (geomType === "LineString") {
-      const vertices = geom.coordinates.map(toLocalMeters);
-      updateLocalBounds(vertices);
-
-      if (isExplicitTrajectory && !trajectoryEntity && vertices.length >= 2) {
-        trajectoryEntity = {
-          layer: layerTag || "EJE_TRAYECTORIA",
-          vertices,
-          properties: props
-        };
-      } else if (isCurbOrEdge) {
-        obstacles.push({
-          id: `geo_curb_${obsCounter++}`,
-          name: nameTag.startsWith("Elemento") ? `Borde de calzada / Bordillo (${nameTag})` : nameTag,
-          type: "road_edge",
-          shape: "polyline",
-          vertices,
-          color: props.color || "#f59e0b",
-          enabled: true
-        });
-      } else if (isIsland) {
-        obstacles.push({
-          id: `geo_island_${obsCounter++}`,
-          name: nameTag,
-          type: "roundabout_island",
-          shape: "polyline",
-          vertices,
-          color: props.color || "#10b981",
-          enabled: true
-        });
-      } else {
-        backgroundEntities.push({
-          layer: layerTag || "VIAL_LINEA",
-          vertices,
-          closed: false,
-          color: props.color || "#38bdf8"
-        });
+        if (forcedRole === "background") {
+          if (geomType === "LineString" || geomType === "MultiLineString") {
+            const lines = geomType === "LineString" ? [geom.coordinates] : geom.coordinates;
+            for (const line of lines) {
+              const vertices = line.map(toLocalMeters);
+              if (vertices.length < 2) continue;
+              updateLocalBounds(vertices);
+              backgroundEntities.push({ layer: baseLayerName, vertices, closed: false, color: props.color || "#64748b" });
+            }
+          } else if (geomType === "Polygon" || geomType === "MultiPolygon") {
+            const polys = geomType === "Polygon" ? [geom.coordinates] : geom.coordinates;
+            for (const poly of polys) {
+              const exterior = poly[0]?.map(toLocalMeters) || [];
+              if (exterior.length < 3) continue;
+              updateLocalBounds(exterior);
+              backgroundEntities.push({ layer: baseLayerName, vertices: exterior, closed: true, color: props.color || "#64748b" });
+            }
+          }
+          continue;
+        }
       }
-    }
 
-    // Procesar MultiLineString
-    else if (geomType === "MultiLineString") {
-      for (const line of geom.coordinates) {
-        const vertices = line.map(toLocalMeters);
+      // Modo automático por propiedades internas (retrocompatible con buildScenarioFromGeoJSON)
+      const isExplicitTrajectory =
+        matchesPattern(layerTag, GEOJSON_LAYER_PATTERNS.TRAJECTORY) ||
+        matchesPattern(props.role || "", GEOJSON_LAYER_PATTERNS.TRAJECTORY) ||
+        props.isTrajectory === true;
+
+      const isCurbOrEdge = matchesPattern(layerTag, GEOJSON_LAYER_PATTERNS.CURBS_AND_EDGES);
+      const isIsland = matchesPattern(layerTag, GEOJSON_LAYER_PATTERNS.ISLANDS);
+      const isBuildingOrBarrier = matchesPattern(layerTag, GEOJSON_LAYER_PATTERNS.BUILDINGS_AND_BARRIERS);
+      const isRestricted = matchesPattern(layerTag, GEOJSON_LAYER_PATTERNS.RESTRICTED_ZONING);
+
+      if (geomType === "LineString") {
+        const vertices = geom.coordinates.map(toLocalMeters);
         updateLocalBounds(vertices);
 
-        if (isCurbOrEdge) {
+        if (isExplicitTrajectory && !trajectoryEntity && vertices.length >= 2) {
+          trajectoryEntity = {
+            layer: layerTag || "EJE_TRAYECTORIA",
+            vertices,
+            properties: props
+          };
+        } else if (isCurbOrEdge) {
           obstacles.push({
             id: `geo_curb_${obsCounter++}`,
-            name: `${nameTag} (Tramo)`,
+            name: nameTag.startsWith("Elemento") ? `Borde de calzada / Bordillo (${nameTag})` : nameTag,
             type: "road_edge",
             shape: "polyline",
             vertices,
             color: props.color || "#f59e0b",
             enabled: true
           });
+        } else if (isIsland) {
+          obstacles.push({
+            id: `geo_island_${obsCounter++}`,
+            name: nameTag,
+            type: "roundabout_island",
+            shape: "polyline",
+            vertices,
+            color: props.color || "#10b981",
+            enabled: true
+          });
+        } else if (isBuildingOrBarrier) {
+          obstacles.push({
+            id: `geo_bar_${obsCounter++}`,
+            name: nameTag,
+            type: "building",
+            shape: "polyline",
+            vertices,
+            color: props.color || "#ef4444",
+            enabled: true
+          });
         } else {
           backgroundEntities.push({
-            layer: layerTag || "VIAL_MULTILINEA",
+            layer: layerTag || "VIAL_LINEA",
             vertices,
             closed: false,
             color: props.color || "#38bdf8"
           });
         }
-      }
-    }
+      } else if (geomType === "MultiLineString") {
+        for (const line of geom.coordinates) {
+          const vertices = line.map(toLocalMeters);
+          updateLocalBounds(vertices);
 
-    // Procesar Polygon
-    else if (geomType === "Polygon") {
-      const exterior = geom.coordinates[0]?.map(toLocalMeters) || [];
-      if (exterior.length >= 3) {
-        updateLocalBounds(exterior);
-
-        if (isIsland) {
-          obstacles.push({
-            id: `geo_island_${obsCounter++}`,
-            name: nameTag.startsWith("Elemento") ? `Isleta / Rotonda (${nameTag})` : nameTag,
-            type: "roundabout_central",
-            shape: "polygon",
-            vertices: exterior,
-            color: props.color || "#10b981",
-            heightM: props.heightM || 0.25,
-            enabled: true
-          });
-        } else if (isBuildingOrBarrier) {
-          obstacles.push({
-            id: `geo_bld_${obsCounter++}`,
-            name: nameTag.startsWith("Elemento") ? `Edificación / Obstáculo (${nameTag})` : nameTag,
-            type: "building",
-            shape: "polygon",
-            vertices: exterior,
-            color: props.color || "#ef4444",
-            heightM: props.heightM || 4.0,
-            enabled: true
-          });
-        } else if (isRestricted) {
-          obstacles.push({
-            id: `geo_restr_${obsCounter++}`,
-            name: nameTag,
-            type: "restricted_zone",
-            shape: "polygon",
-            vertices: exterior,
-            color: props.color || "#eab308",
-            enabled: true
-          });
-        } else if (isCurbOrEdge) {
-          obstacles.push({
-            id: `geo_curb_${obsCounter++}`,
-            name: nameTag,
-            type: "road_edge",
-            shape: "polygon",
-            vertices: exterior,
-            color: props.color || "#f59e0b",
-            enabled: true
-          });
-        } else {
-          backgroundEntities.push({
-            layer: layerTag || "SUPERFICIE_CALZADA",
-            vertices: exterior,
-            closed: true,
-            color: props.color || "#64748b"
-          });
+          if (isCurbOrEdge) {
+            obstacles.push({
+              id: `geo_curb_${obsCounter++}`,
+              name: `${nameTag} (Tramo)`,
+              type: "road_edge",
+              shape: "polyline",
+              vertices,
+              color: props.color || "#f59e0b",
+              enabled: true
+            });
+          } else if (isBuildingOrBarrier) {
+            obstacles.push({
+              id: `geo_bar_${obsCounter++}`,
+              name: `${nameTag} (Tramo)`,
+              type: "building",
+              shape: "polyline",
+              vertices,
+              color: props.color || "#ef4444",
+              enabled: true
+            });
+          } else {
+            backgroundEntities.push({
+              layer: layerTag || "VIAL_MULTILINEA",
+              vertices,
+              closed: false,
+              color: props.color || "#38bdf8"
+            });
+          }
         }
-      }
-    }
-
-    // Procesar MultiPolygon
-    else if (geomType === "MultiPolygon") {
-      for (const poly of geom.coordinates) {
-        const exterior = poly[0]?.map(toLocalMeters) || [];
+      } else if (geomType === "Polygon") {
+        const exterior = geom.coordinates[0]?.map(toLocalMeters) || [];
         if (exterior.length >= 3) {
           updateLocalBounds(exterior);
-          obstacles.push({
-            id: `geo_poly_${obsCounter++}`,
-            name: `${nameTag} (Parte)`,
-            type: isIsland ? "roundabout_island" : "building",
-            shape: "polygon",
-            vertices: exterior,
-            color: isIsland ? "#10b981" : "#ef4444",
-            enabled: true
-          });
-        }
-      }
-    }
 
-    // Procesar Point
-    else if (geomType === "Point") {
-      const [px, py] = toLocalMeters(geom.coordinates);
-      updateLocalBounds([[px, py]]);
-      obstacles.push({
-        id: `geo_point_${obsCounter++}`,
-        name: nameTag.startsWith("Elemento") ? `Pilar / Farola (${nameTag})` : nameTag,
-        type: "column",
-        shape: "circle",
-        x: px,
-        y: py,
-        radius: Number(props.radius || 0.35),
-        heightM: Number(props.heightM || 3.0),
-        color: props.color || "#f97316",
-        enabled: true
-      });
+          if (isIsland) {
+            obstacles.push({
+              id: `geo_island_${obsCounter++}`,
+              name: nameTag.startsWith("Elemento") ? `Isleta / Rotonda (${nameTag})` : nameTag,
+              type: "roundabout_central",
+              shape: "polygon",
+              vertices: exterior,
+              color: props.color || "#10b981",
+              heightM: props.heightM || 0.25,
+              enabled: true
+            });
+          } else if (isBuildingOrBarrier) {
+            obstacles.push({
+              id: `geo_bld_${obsCounter++}`,
+              name: nameTag.startsWith("Elemento") ? `Edificación / Obstáculo (${nameTag})` : nameTag,
+              type: "building",
+              shape: "polygon",
+              vertices: exterior,
+              color: props.color || "#ef4444",
+              heightM: props.heightM || 4.0,
+              enabled: true
+            });
+          } else if (isRestricted) {
+            obstacles.push({
+              id: `geo_restr_${obsCounter++}`,
+              name: nameTag,
+              type: "restricted_zone",
+              shape: "polygon",
+              vertices: exterior,
+              color: props.color || "#eab308",
+              enabled: true
+            });
+          } else if (isCurbOrEdge) {
+            obstacles.push({
+              id: `geo_curb_${obsCounter++}`,
+              name: nameTag,
+              type: "road_edge",
+              shape: "polygon",
+              vertices: exterior,
+              color: props.color || "#f59e0b",
+              enabled: true
+            });
+          } else {
+            backgroundEntities.push({
+              layer: layerTag || "SUPERFICIE_CALZADA",
+              vertices: exterior,
+              closed: true,
+              color: props.color || "#64748b"
+            });
+          }
+        }
+      } else if (geomType === "MultiPolygon") {
+        for (const poly of geom.coordinates) {
+          const exterior = poly[0]?.map(toLocalMeters) || [];
+          if (exterior.length >= 3) {
+            updateLocalBounds(exterior);
+            obstacles.push({
+              id: `geo_poly_${obsCounter++}`,
+              name: `${nameTag} (Parte)`,
+              type: isIsland ? "roundabout_island" : "building",
+              shape: "polygon",
+              vertices: exterior,
+              color: isIsland ? "#10b981" : "#ef4444",
+              enabled: true
+            });
+          }
+        }
+      } else if (geomType === "Point") {
+        const [px, py] = toLocalMeters(geom.coordinates);
+        updateLocalBounds([[px, py]]);
+        obstacles.push({
+          id: `geo_point_${obsCounter++}`,
+          name: nameTag.startsWith("Elemento") ? `Pilar / Farola (${nameTag})` : nameTag,
+          type: "column",
+          shape: "circle",
+          x: px,
+          y: py,
+          radius: Number(props.radius || 0.35),
+          heightM: Number(props.heightM || 3.0),
+          color: props.color || "#f97316",
+          enabled: true
+        });
+      }
     }
   }
 
-  // 4. Si hay una entidad de trayectoria detectada, construir la maniobra cinemática
   let maneuver = null;
   if (trajectoryEntity && trajectoryEntity.vertices && trajectoryEntity.vertices.length >= 2) {
     try {
@@ -546,10 +794,12 @@ export function buildScenarioFromGeoJSON(geojsonInput, options = {}) {
 
   return {
     maneuver,
+    referenceAxes,
     obstacles,
     backgroundEntities,
     bounds,
     trajectoryEntity,
+    sharedOrigin,
     geoCenter: {
       lat: Number(centerLat.toFixed(7)),
       lon: Number(centerLon.toFixed(7))
@@ -564,4 +814,20 @@ export function buildScenarioFromGeoJSON(geojsonInput, options = {}) {
       opacity: 0.8
     }
   };
+}
+
+/**
+ * Convierte un FeatureCollection o Feature GeoJSON en un escenario completo de TurnSim,
+ * proyectando las geometrías al sistema métrico local y georreferenciando automáticamente
+ * la capa de ortofotos PNOA del IGN.
+ */
+export function buildScenarioFromGeoJSON(geojsonInput, options = {}) {
+  const features = parseGeoJSON(geojsonInput);
+  if (features.length === 0) {
+    throw new Error("El archivo GeoJSON no contiene ninguna entidad geométrica procesable.");
+  }
+  return buildScenarioFromGeoJSONFiles(
+    [{ fileName: options.fileName || "escenario.geojson", features, role: options.role || "auto" }],
+    options
+  );
 }

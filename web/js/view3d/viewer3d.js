@@ -28,6 +28,7 @@ export class Viewer3D {
       wheelTraces: true,
       obstacles: true,
       cadBackground: true,
+      referenceAxes: true,
       dimensions: true
     };
 
@@ -36,6 +37,7 @@ export class Viewer3D {
     this.vehicle = null;
     this.obstacles = [];
     this.cadBackgroundEntities = [];
+    this.referenceAxes = [];
     this.interferenceReport = null;
 
     if (!this.available) {
@@ -155,6 +157,7 @@ export class Viewer3D {
 
     // Grupos dinámicos por capa
     this.cadBackgroundGroup = new THREE.Group();
+    this.referenceAxesGroup = new THREE.Group();
     this.envelopeGroup = new THREE.Group();
     this.marginGroup = new THREE.Group();
     this.refTracesGroup = new THREE.Group();
@@ -164,6 +167,7 @@ export class Viewer3D {
     this.vehicleGroup = new THREE.Group();
 
     this.scene.add(this.cadBackgroundGroup);
+    this.scene.add(this.referenceAxesGroup);
     this.scene.add(this.marginGroup);
     this.scene.add(this.envelopeGroup);
     this.scene.add(this.wheelTracesGroup);
@@ -301,11 +305,14 @@ export class Viewer3D {
     }
   }
 
-  setData({ vehicle, simResult, obstacles, interferenceReport, cadBackgroundEntities, waypoints }) {
+  setData({ vehicle, simResult, obstacles, interferenceReport, cadBackgroundEntities, referenceAxes, waypoints }) {
     this.vehicle = vehicle;
     this.simResult = simResult;
     this.obstacles = obstacles || [];
     this.cadBackgroundEntities = cadBackgroundEntities || this.cadBackgroundEntities || [];
+    if (Array.isArray(referenceAxes)) {
+      this.referenceAxes = referenceAxes;
+    }
     this.interferenceReport = interferenceReport || null;
     if (Array.isArray(waypoints)) {
       this.waypoints = waypoints;
@@ -314,6 +321,7 @@ export class Viewer3D {
     if (!this.available) return;
 
     this._rebuildCadBackground();
+    this._rebuildReferenceAxes();
     this._rebuildObstacles();
 
     if (!this.simResult || !this.simResult.states || !this.simResult.states.length) {
@@ -361,6 +369,16 @@ export class Viewer3D {
     }
   }
 
+  _rebuildReferenceAxes() {
+    if (!this.referenceAxesGroup) return;
+    this._clearGroup(this.referenceAxesGroup);
+    if (!this.referenceAxes || this.referenceAxes.length === 0) return;
+    for (const ax of this.referenceAxes) {
+      if (!ax.vertices || ax.vertices.length < 2) continue;
+      this._addPolyline3D(this.referenceAxesGroup, ax.vertices, 0x06b6d4, 0.025, true);
+    }
+  }
+
   updateObstaclesAndInterferences(obstacles, interferenceReport) {
     this.obstacles = obstacles || [];
     this.interferenceReport = interferenceReport || null;
@@ -375,6 +393,9 @@ export class Viewer3D {
     this.gridHelper.visible = Boolean(this.layers.grid);
     if (this.cadBackgroundGroup) {
       this.cadBackgroundGroup.visible = Boolean(this.layers.cadBackground);
+    }
+    if (this.referenceAxesGroup) {
+      this.referenceAxesGroup.visible = Boolean(this.layers.referenceAxes);
     }
     this.envelopeGroup.visible = Boolean(this.layers.envelope);
     this.marginGroup.visible = Boolean(this.layers.margin);

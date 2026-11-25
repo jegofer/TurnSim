@@ -21,24 +21,37 @@ function normalizeLayerName(name) {
  * Capas sugeridas / convencionales en TurnSim
  */
 export const SUGGESTED_LAYERS = {
+  REFERENCE_AXES: [
+    "EJES_VIALES",
+    "EJE_VIAL",
+    "EJES_CARRETERA",
+    "EJE_CARRETERA",
+    "EJES",
+    "ROAD_AXES",
+    "CENTERLINES",
+    "CENTERLINE",
+    "GUIAS"
+  ],
   TRAJECTORY: [
     "TURNSIM_TRAYECTORIA",
     "TURNSIM_EJE",
     "TRAYECTORIA",
     "EJE_CAMION",
     "EJE_TRAYECTORIA",
-    "EJE_VIAL",
-    "EJE",
     "TRAJECTORY",
     "SWEPT_AXIS",
     "CAMINO",
-    "RUTA"
+    "RUTA",
+    "EJE"
   ],
   OBSTACLES: [
+    "OBSTACULOS_ENVOLVENTES",
+    "OBSTACULOS_VIALES",
     "TURNSIM_OBSTACULOS",
     "TURNSIM_OBSTACULO",
     "OBSTACULOS",
     "OBSTACULO",
+    "ENVOLVENTES",
     "EDIFICIOS",
     "EDIFICIO",
     "MUELLES_CARGA",
@@ -552,11 +565,23 @@ export function detectSuggestedLayerMapping(availableLayers) {
     normMap.set(normalizeLayerName(lyr), lyr);
   }
 
-  // 1. Capa de trayectoria
+  // 1. Capas de ejes viales de referencia (guía y snap magnético)
+  const referenceAxisLayers = [];
+  for (const candidate of SUGGESTED_LAYERS.REFERENCE_AXES) {
+    const candNorm = normalizeLayerName(candidate);
+    for (const [nKey, orig] of normMap.entries()) {
+      if ((nKey === candNorm || nKey.includes(candNorm)) && !referenceAxisLayers.includes(orig)) {
+        referenceAxisLayers.push(orig);
+      }
+    }
+  }
+
+  // 2. Capa de trayectoria directa (omite capas ya clasificadas como ejes de referencia)
   let trajectoryLayer = null;
   for (const candidate of SUGGESTED_LAYERS.TRAJECTORY) {
     const candNorm = normalizeLayerName(candidate);
     for (const [nKey, orig] of normMap.entries()) {
+      if (referenceAxisLayers.includes(orig)) continue;
       if (nKey === candNorm || nKey.includes(candNorm)) {
         trajectoryLayer = orig;
         break;
@@ -565,7 +590,7 @@ export function detectSuggestedLayerMapping(availableLayers) {
     if (trajectoryLayer) break;
   }
 
-  // 2. Capas de obstáculos
+  // 3. Capas de obstáculos
   const obstacleLayers = [];
   for (const candidate of SUGGESTED_LAYERS.OBSTACLES) {
     const candNorm = normalizeLayerName(candidate);
@@ -576,7 +601,7 @@ export function detectSuggestedLayerMapping(availableLayers) {
     }
   }
 
-  // 3. Capas de bordes/bordillos
+  // 4. Capas de bordes/bordillos
   const boundaryLayers = [];
   for (const candidate of SUGGESTED_LAYERS.BOUNDARIES) {
     const candNorm = normalizeLayerName(candidate);
@@ -587,7 +612,7 @@ export function detectSuggestedLayerMapping(availableLayers) {
     }
   }
 
-  // 4. Capas de zonas restringidas
+  // 5. Capas de zonas restringidas
   const restrictedLayers = [];
   for (const candidate of SUGGESTED_LAYERS.RESTRICTED) {
     const candNorm = normalizeLayerName(candidate);
@@ -600,6 +625,7 @@ export function detectSuggestedLayerMapping(availableLayers) {
 
   return {
     trajectoryLayer,
+    referenceAxisLayers,
     obstacleLayers,
     boundaryLayers,
     restrictedLayers
@@ -751,12 +777,20 @@ export function convertPolylineToManeuver(vertices, options = {}) {
  * - bounds: Bounding box métrico global [minX, minY, maxX, maxY]
  */
 export function buildScenarioFromDXF(parsedDxf, mapping, options = {}) {
-  const { trajectoryLayer, obstacleLayers = [], boundaryLayers = [], restrictedLayers = [] } = mapping;
+  const {
+    trajectoryLayer = null,
+    referenceAxisLayers = [],
+    obstacleLayers = [],
+    boundaryLayers = [],
+    restrictedLayers = [],
+    excludedBackgroundLayers = []
+  } = mapping || {};
   const entities = parsedDxf.entities || [];
   const scale = Number(options.scale || 1.0);
   const applyScale = scale !== 1.0 && Number.isFinite(scale) && scale > 0;
 
   let trajectoryEntity = null;
+  const referenceAxes = [];
   const obstacles = [];
   const backgroundEntities = [];
 
@@ -770,7 +804,24 @@ export function buildScenarioFromDXF(parsedDxf, mapping, options = {}) {
     }
   }
 
+  /**
+   * Detecta cierre geométrico en polilíneas CAD cuando el primer y último vértice
+   * coinciden (< 1 cm) aunque el flag DXF 70=1 no estuviese marcado.
+   */
+  function resolveClosure(rawClosed, verts) {
+    if (rawClosed) return { closed: true, vertices: verts };
+    if (verts.length >= 4) {
+      const first = verts[0];
+      const last = verts[verts.length - 1];
+      if (Math.hypot(first[0] - last[0], first[1] - last[1]) < 0.01) {
+        return { closed: true, vertices: verts.slice(0, -1) };
+      }
+    }
+    return { closed: false, vertices: verts };
+  }
+
   let obsCounter = 1;
+  let axisCounter = 1;
 
   for (const rawEnt of entities) {
     if (!rawEnt.vertices || rawEnt.vertices.length < 2) continue;
@@ -779,26 +830,39 @@ export function buildScenarioFromDXF(parsedDxf, mapping, options = {}) {
       : rawEnt.vertices;
     const ent = { ...rawEnt, vertices };
 
-    updateBounds(ent.vertices);
-
     if (trajectoryLayer && ent.layer === trajectoryLayer && !trajectoryEntity) {
+      updateBounds(ent.vertices);
       trajectoryEntity = ent;
       continue;
     }
 
-    if (obstacleLayers.includes(ent.layer)) {
+    if (referenceAxisLayers.includes(ent.layer)) {
+      updateBounds(ent.vertices);
+      referenceAxes.push({
+        id: `dxf_axis_${axisCounter}`,
+        name: `Eje vial (${ent.layer} #${axisCounter})`,
+        layer: ent.layer,
+        vertices: ent.vertices,
+        closed: Boolean(ent.closed)
+      });
+      axisCounter++;
+    } else if (obstacleLayers.includes(ent.layer)) {
+      const resolved = resolveClosure(Boolean(ent.closed), ent.vertices);
+      updateBounds(resolved.vertices);
       obstacles.push({
-        id: `dxf_obs_${obsCounter++}`,
+        id: `dxf_obs_${obsCounter}`,
         name: `Obstáculo CAD (${ent.layer} #${obsCounter})`,
         type: "building",
-        shape: ent.closed ? "polygon" : "polyline",
-        vertices: ent.vertices,
+        shape: resolved.closed ? "polygon" : "polyline",
+        vertices: resolved.vertices,
         color: "#ef4444",
         enabled: true
       });
+      obsCounter++;
     } else if (boundaryLayers.includes(ent.layer)) {
+      updateBounds(ent.vertices);
       obstacles.push({
-        id: `dxf_curb_${obsCounter++}`,
+        id: `dxf_curb_${obsCounter}`,
         name: `Borde/Bordillo (${ent.layer} #${obsCounter})`,
         type: "road_edge",
         shape: "polyline",
@@ -806,18 +870,23 @@ export function buildScenarioFromDXF(parsedDxf, mapping, options = {}) {
         color: "#f59e0b",
         enabled: true
       });
+      obsCounter++;
     } else if (restrictedLayers.includes(ent.layer)) {
+      const resolved = resolveClosure(Boolean(ent.closed), ent.vertices);
+      updateBounds(resolved.vertices);
       obstacles.push({
-        id: `dxf_restr_${obsCounter++}`,
+        id: `dxf_restr_${obsCounter}`,
         name: `Zona Restringida (${ent.layer} #${obsCounter})`,
         type: "restricted_zone",
-        shape: ent.closed ? "polygon" : "polyline",
-        vertices: ent.vertices,
+        shape: resolved.closed ? "polygon" : "polyline",
+        vertices: resolved.vertices,
         color: "#eab308",
         enabled: true
       });
-    } else {
+      obsCounter++;
+    } else if (!excludedBackgroundLayers.includes(ent.layer)) {
       // Elemento de contexto visual
+      updateBounds(ent.vertices);
       backgroundEntities.push({
         layer: ent.layer,
         vertices: ent.vertices,
@@ -844,6 +913,11 @@ export function buildScenarioFromDXF(parsedDxf, mapping, options = {}) {
     if (trajectoryEntity && trajectoryEntity.vertices) {
       trajectoryEntity.vertices = trajectoryEntity.vertices.map(([vx, vy]) => [vx - ox, vy - oy]);
     }
+    for (const ax of referenceAxes) {
+      if (ax.vertices) {
+        ax.vertices = ax.vertices.map(([vx, vy]) => [vx - ox, vy - oy]);
+      }
+    }
     for (const obs of obstacles) {
       if (obs.vertices) {
         obs.vertices = obs.vertices.map(([vx, vy]) => [vx - ox, vy - oy]);
@@ -869,13 +943,22 @@ export function buildScenarioFromDXF(parsedDxf, mapping, options = {}) {
   }
 
   const bounds = Number.isFinite(minX) ? { minX, minY, maxX, maxY } : null;
+  const isUtmLikely = Boolean(
+    originOffset &&
+    originOffset.x > 100000 &&
+    originOffset.x < 900000 &&
+    originOffset.y > 3000000 &&
+    originOffset.y < 5500000
+  );
 
   return {
     maneuver,
+    referenceAxes,
     obstacles,
     backgroundEntities,
     bounds,
     trajectoryEntity,
-    originOffset
+    originOffset,
+    isUtmLikely
   };
 }

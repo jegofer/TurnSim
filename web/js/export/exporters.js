@@ -75,6 +75,8 @@ export function generateSVGDiagram(
   const highlightBbox = options?.highlightBbox || null;
 
   const showCadBackground = layerVisibility.cadBackground !== false;
+  const showReferenceAxes = layerVisibility.referenceAxes !== false;
+  const referenceAxes = Array.isArray(options?.referenceAxes) ? options.referenceAxes : [];
   const showEnvelope = layerVisibility.envelope !== false;
   const showMargin = layerVisibility.margin !== false;
   const showWheelTraces = !overviewMode && layerVisibility.wheelTraces !== false;
@@ -203,6 +205,19 @@ export function generateSVGDiagram(
           `    <polyline points="${polyToPointsAttr(ent.vertices)}" fill="none" stroke="#94a3b8" stroke-width="${cadStrokeW}" stroke-dasharray="0.25 0.15" />`
         );
       }
+    }
+    lines.push(`  </g>`);
+  }
+
+  // 0.5 Ejes viales de referencia
+  if (showReferenceAxes && referenceAxes && referenceAxes.length > 0) {
+    lines.push(`  <g id="reference-axes">`);
+    const axisStrokeW = ovStroke(0.06);
+    for (const ax of referenceAxes) {
+      if (!ax.vertices || ax.vertices.length < 2) continue;
+      lines.push(
+        `    <polyline points="${polyToPointsAttr(ax.vertices)}" fill="none" stroke="#0891b2" stroke-width="${axisStrokeW}" stroke-dasharray="0.60 0.20 0.12 0.20" />`
+      );
     }
     lines.push(`  </g>`);
   }
@@ -607,6 +622,7 @@ export function openStructuredTechnicalReport({
   obstacles,
   layerVisibility,
   cadBackgroundEntities = [],
+  referenceAxes = [],
   diligence = {}
 }) {
   const nowStr = new Date().toLocaleString("es-ES", {
@@ -622,7 +638,7 @@ export function openStructuredTechnicalReport({
     obstacles,
     layerVisibility,
     cadBackgroundEntities,
-    { focusOnTrajectory: true, paddingM: 2.0 }
+    { focusOnTrajectory: true, paddingM: 2.0, referenceAxes }
   );
   const overviewSvgDiagram = generateSVGDiagram(
     simResult,
@@ -630,7 +646,7 @@ export function openStructuredTechnicalReport({
     obstacles,
     { ...layerVisibility, wheelTraces: false, ghosts: false, dimensions: false },
     cadBackgroundEntities,
-    { focusOnTrajectory: false, overviewMode: true, highlightBbox: detailBbox }
+    { focusOnTrajectory: false, overviewMode: true, highlightBbox: detailBbox, referenceAxes }
   );
 
   const segmentsRows = (maneuver.segments || [])

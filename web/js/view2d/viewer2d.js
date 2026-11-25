@@ -79,11 +79,15 @@ export class Viewer2D {
     this.interferenceReport = null;
     this.currentStateIndex = 0;
     this.cadBackgroundEntities = []; // Líneas y aristas de contexto DXF
+    this.referenceAxes = []; // Ejes viales de referencia (guía visual + snap magnético + adopción)
+    this.hoveredReferenceAxisIndex = -1;
+    this.onAdoptReferenceAxis = null;
     this.isComputing = false;
 
     this.layers = {
       grid: true,
       cadBackground: true,
+      referenceAxes: true,
       envelope: true,
       margin: true,
       refTraces: true,
@@ -226,6 +230,15 @@ export class Viewer2D {
 
       // 1. Modo edición gráfica de waypoints
       if (this.waypointMode) {
+        // Shift+Clic sobre un eje vial de referencia: adoptar el eje completo como trayectoria
+        if (e.shiftKey && this.layers.referenceAxes && this.referenceAxes.length > 0) {
+          const axisIdx = this._findReferenceAxisAt(wx, wy, 14);
+          if (axisIdx >= 0 && typeof this.onAdoptReferenceAxis === "function") {
+            this.onAdoptReferenceAxis(this.referenceAxes[axisIdx], { clickWorld: [wx, wy] });
+            return;
+          }
+        }
+
         const hitIdx = this._findWaypointAt(wx, wy);
         if (hitIdx >= 0) {
           this.draggedWaypointIndex = hitIdx;
@@ -233,9 +246,12 @@ export class Viewer2D {
           return;
         }
 
-        const segIdx = this._findWaypointSegmentAt(wx, wy);
-        const xFixed = Number(wx.toFixed(2));
-        const yFixed = Number(wy.toFixed(2));
+        const wpSnap = e.altKey ? null : this._findSnapPoint(wx, wy, 14);
+        const targetX = wpSnap ? wpSnap.x : wx;
+        const targetY = wpSnap ? wpSnap.y : wy;
+        const segIdx = this._findWaypointSegmentAt(targetX, targetY);
+        const xFixed = Number(targetX.toFixed(2));
+        const yFixed = Number(targetY.toFixed(2));
         if (segIdx >= 0) {
           const prevDir = this._wpDir(this.waypoints[segIdx], this.activeDrawDirection);
           this.waypoints.splice(segIdx + 1, 0, { x: xFixed, y: yFixed, direction: prevDir, directionExplicit: false });
@@ -327,8 +343,10 @@ export class Viewer2D {
 
       if (this.draggedWaypointIndex >= 0 && this.waypoints[this.draggedWaypointIndex]) {
         const oldWp = this.waypoints[this.draggedWaypointIndex];
-        const xFixed = Number(wx.toFixed(2));
-        const yFixed = Number(wy.toFixed(2));
+        const dragSnap = e.altKey ? null : this._findSnapPoint(wx, wy, 14);
+        this.activeSnap = dragSnap;
+        const xFixed = Number((dragSnap ? dragSnap.x : wx).toFixed(2));
+        const yFixed = Number((dragSnap ? dragSnap.y : wy).toFixed(2));
         if (oldWp && !Array.isArray(oldWp)) {
           this.waypoints[this.draggedWaypointIndex] = { ...oldWp, x: xFixed, y: yFixed };
         } else {
@@ -343,9 +361,19 @@ export class Viewer2D {
 
       if (this.waypointMode) {
         const prevHover = this.hoveredWaypointIndex;
+        const prevAxisHover = this.hoveredReferenceAxisIndex;
+        const prevSnap = this.activeSnap;
         this.hoveredWaypointIndex = this._findWaypointAt(wx, wy);
-        this.canvas.style.cursor = this.hoveredWaypointIndex >= 0 ? "pointer" : "crosshair";
-        if (prevHover !== this.hoveredWaypointIndex) {
+        this.hoveredReferenceAxisIndex = (e.shiftKey && this.layers.referenceAxes && this.referenceAxes.length > 0)
+          ? this._findReferenceAxisAt(wx, wy, 14)
+          : -1;
+        this.activeSnap = (this.hoveredWaypointIndex < 0 && !e.altKey)
+          ? this._findSnapPoint(wx, wy, 14)
+          : null;
+        this.canvas.style.cursor = (this.hoveredWaypointIndex >= 0 || this.hoveredReferenceAxisIndex >= 0) ? "pointer" : "crosshair";
+        const snapChanged = Boolean(prevSnap) !== Boolean(this.activeSnap) ||
+          (prevSnap && this.activeSnap && (prevSnap.x !== this.activeSnap.x || prevSnap.y !== this.activeSnap.y));
+        if (prevHover !== this.hoveredWaypointIndex || prevAxisHover !== this.hoveredReferenceAxisIndex || snapChanged) {
           this.render();
         }
       }
@@ -603,53 +631,122 @@ export class Viewer2D {
     };
   }
 
+  _findReferenceAxisAt(wx, wy, tolPx = 14) {
+    if (!this.referenceAxes || this.referenceAxes.length === 0) return -1;
+    const [smx, smy] = this.worldToScreen(wx, wy);
+    let bestIdx = -1;
+    let bestDist = tolPx;
+
+    for (let aIdx = 0; aIdx < this.referenceAxes.length; aIdx++) {
+      const verts = this.referenceAxes[aIdx]?.vertices;
+      if (!verts || verts.length < 2) continue;
+      for (let i = 0; i < verts.length - 1; i++) {
+        const [ax, ay] = this.worldToScreen(verts[i][0], verts[i][1]);
+        const [bx, by] = this.worldToScreen(verts[i + 1][0], verts[i + 1][1]);
+        const dx = bx - ax;
+        const dy = by - ay;
+        const lenSq = dx * dx + dy * dy;
+        const t = lenSq > 1e-6 ? Math.max(0, Math.min(1, ((smx - ax) * dx + (smy - ay) * dy) / lenSq)) : 0;
+        const px = ax + t * dx;
+        const py = ay + t * dy;
+        const d = Math.hypot(smx - px, smy - py);
+        if (d < bestDist) {
+          bestDist = d;
+          bestIdx = aIdx;
+        }
+      }
+    }
+    return bestIdx;
+  }
+
   _findSnapPoint(wx, wy, tolPx = 14) {
     const candidates = [];
 
-    // Obstáculos
+    // 1. Ejes viales de referencia (vértices y punto más cercano sobre tramo)
+    if (this.referenceAxes && this.referenceAxes.length > 0 && this.layers.referenceAxes) {
+      for (const axis of this.referenceAxes) {
+        const verts = axis.vertices;
+        if (!verts || verts.length < 2) continue;
+        const axisLabel = axis.name || axis.layer || "Eje vial";
+        for (const v of verts) {
+          candidates.push({ x: v[0], y: v[1], label: `${axisLabel} (vértice)`, snapType: "axis_vertex", bonusPx: 4 });
+        }
+        // Proyección ortogonal más cercana sobre cada segmento del eje
+        let bestSegPt = null;
+        let bestSegDistSq = Infinity;
+        for (let i = 0; i < verts.length - 1; i++) {
+          const ax = verts[i][0], ay = verts[i][1];
+          const bx = verts[i + 1][0], by = verts[i + 1][1];
+          const dx = bx - ax, dy = by - ay;
+          const lenSq = dx * dx + dy * dy;
+          if (lenSq < 1e-9) continue;
+          const t = Math.max(0, Math.min(1, ((wx - ax) * dx + (wy - ay) * dy) / lenSq));
+          const px = ax + t * dx;
+          const py = ay + t * dy;
+          const dSq = (wx - px) * (wx - px) + (wy - py) * (wy - py);
+          if (dSq < bestSegDistSq) {
+            bestSegDistSq = dSq;
+            bestSegPt = [px, py];
+          }
+        }
+        if (bestSegPt) {
+          candidates.push({
+            x: Number(bestSegPt[0].toFixed(3)),
+            y: Number(bestSegPt[1].toFixed(3)),
+            label: `${axisLabel} (sobre eje)`,
+            snapType: "axis_edge",
+            bonusPx: 1.5
+          });
+        }
+      }
+    }
+
+    // 2. Obstáculos
     if (this.obstacles && this.layers.obstacles) {
       for (const obs of this.obstacles) {
         if (obs.enabled === false) continue;
         const verts = getObstacleVertices(obs);
         for (const v of verts) {
-          candidates.push({ x: v[0], y: v[1], label: obs.name });
+          candidates.push({ x: v[0], y: v[1], label: obs.name, snapType: "obstacle", bonusPx: 0 });
         }
         if (Number.isFinite(obs.x) && Number.isFinite(obs.y)) {
-          candidates.push({ x: obs.x, y: obs.y, label: `${obs.name} (centro)` });
+          candidates.push({ x: obs.x, y: obs.y, label: `${obs.name} (centro)`, snapType: "obstacle", bonusPx: 0 });
         }
       }
     }
 
-    // Vehículo activo en el fotograma actual
+    // 3. Vehículo activo en el fotograma actual
     if (this.simResult && this.simResult.states) {
       const s = this.simResult.states[this.currentStateIndex] || this.simResult.states[0];
       if (s) {
-        candidates.push({ x: s.x, y: s.y, label: "Eje motriz tractora (P_ref)" });
-        if (s.hitch) candidates.push({ x: s.hitch[0], y: s.hitch[1], label: "Quinta rueda (Kingpin)" });
+        candidates.push({ x: s.x, y: s.y, label: "Eje motriz tractora (P_ref)", bonusPx: 0 });
+        if (s.hitch) candidates.push({ x: s.hitch[0], y: s.hitch[1], label: "Quinta rueda (Kingpin)", bonusPx: 0 });
         if (s.tractorFrontAxle && s.tractorFrontAxle.center) {
-          candidates.push({ x: s.tractorFrontAxle.center[0], y: s.tractorFrontAxle.center[1], label: "Eje delantero directriz" });
+          candidates.push({ x: s.tractorFrontAxle.center[0], y: s.tractorFrontAxle.center[1], label: "Eje delantero directriz", bonusPx: 0 });
         }
         if (Number.isFinite(s.tx) && Number.isFinite(s.ty)) {
-          candidates.push({ x: s.tx, y: s.ty, label: "Centro trídem semirremolque" });
+          candidates.push({ x: s.tx, y: s.ty, label: "Centro trídem semirremolque", bonusPx: 0 });
         }
         for (const pt of s.tractorPolygon || []) {
-          candidates.push({ x: pt[0], y: pt[1], label: "Esquina tractora" });
+          candidates.push({ x: pt[0], y: pt[1], label: "Esquina tractora", bonusPx: 0 });
         }
         for (const pt of s.trailerPolygon || []) {
-          candidates.push({ x: pt[0], y: pt[1], label: "Esquina semirremolque" });
+          candidates.push({ x: pt[0], y: pt[1], label: "Esquina semirremolque", bonusPx: 0 });
         }
       }
     }
 
     const [smx, smy] = this.worldToScreen(wx, wy);
     let best = null;
-    let bestDist = tolPx;
+    let bestScore = tolPx;
 
     for (const c of candidates) {
       const [scx, scy] = this.worldToScreen(c.x, c.y);
       const d = Math.hypot(scx - smx, scy - smy);
-      if (d < bestDist) {
-        bestDist = d;
+      if (d > tolPx) continue;
+      const score = d - (c.bonusPx || 0);
+      if (score < bestScore) {
+        bestScore = score;
         best = { ...c, screenX: scx, screenY: scy };
       }
     }
@@ -687,8 +784,11 @@ export class Viewer2D {
     for (const ent of this.cadBackgroundEntities || []) {
       for (const p of ent.vertices || []) addPt(p[0], p[1]);
     }
+    for (const ax of this.referenceAxes || []) {
+      for (const p of ax.vertices || []) addPt(p[0], p[1]);
+    }
     for (const wp of this.waypoints || []) {
-      addPt(wp[0], wp[1]);
+      addPt(this._wpX(wp), this._wpY(wp));
     }
 
     if (!Number.isFinite(minX)) {
@@ -707,13 +807,16 @@ export class Viewer2D {
     this.render();
   }
 
-  setData({ vehicle, simResult, obstacles, interferenceReport, cadBackgroundEntities }) {
+  setData({ vehicle, simResult, obstacles, interferenceReport, cadBackgroundEntities, referenceAxes }) {
     this.vehicle = vehicle;
     this.simResult = simResult;
     this.obstacles = obstacles || [];
     this.interferenceReport = interferenceReport || null;
     if (Array.isArray(cadBackgroundEntities)) {
       this.cadBackgroundEntities = cadBackgroundEntities;
+    }
+    if (Array.isArray(referenceAxes)) {
+      this.referenceAxes = referenceAxes;
     }
     if (this.simResult && this.currentStateIndex >= this.simResult.states.length) {
       this.currentStateIndex = 0;
@@ -788,6 +891,11 @@ export class Viewer2D {
       this._drawCadBackground(ctx);
     }
 
+    // Capa de ejes viales de referencia (guía de trazado y snap magnético)
+    if (this.layers.referenceAxes && this.referenceAxes && this.referenceAxes.length > 0) {
+      this._drawReferenceAxes(ctx);
+    }
+
     // Obstáculos del entorno (edificios, bordillos, vallas, zonas restringidas)
     // Se dibujan SIEMPRE para que los obstáculos y el plano CAD sean visibles
     // antes y durante el trazado o simulación de una maniobra
@@ -802,10 +910,13 @@ export class Viewer2D {
     if (!hasSimulation) {
       if (this.measureMode || this.measurePoints.length > 0) {
         this._drawMeasurement(ctx);
+      } else if (this.waypointMode && this.activeSnap) {
+        this._drawSnapIndicator(ctx, this.activeSnap);
       }
 
       // Si el visor está completamente limpio (sin simulación, sin CAD y sin obstáculos)
       const hasContent = (this.cadBackgroundEntities && this.cadBackgroundEntities.length > 0) ||
+                         (this.referenceAxes && this.referenceAxes.length > 0) ||
                          (this.obstacles && this.obstacles.length > 0) ||
                          (this.waypoints && this.waypoints.length > 0) ||
                          (this.layers.pnoa && this.pnoaConfig && this.pnoaConfig.enabled);
@@ -1277,6 +1388,23 @@ export class Viewer2D {
         this._drawPolygon(ctx, ent.vertices, "rgba(30, 41, 59, 0.35)", "rgba(148, 163, 184, 0.75)", 1.2, []);
       } else {
         this._drawPolyline(ctx, ent.vertices, "rgba(148, 163, 184, 0.70)", 1.2, []);
+      }
+    }
+    ctx.restore();
+  }
+
+  _drawReferenceAxes(ctx) {
+    if (!this.referenceAxes || this.referenceAxes.length === 0) return;
+    ctx.save();
+    for (let i = 0; i < this.referenceAxes.length; i++) {
+      const ax = this.referenceAxes[i];
+      if (!ax.vertices || ax.vertices.length < 2) continue;
+      const isHovered = i === this.hoveredReferenceAxisIndex;
+      if (isHovered) {
+        this._drawPolyline(ctx, ax.vertices, "rgba(34, 211, 238, 0.38)", 7.5, []);
+        this._drawPolyline(ctx, ax.vertices, "#67e8f9", 2.8, [14, 5, 3, 5]);
+      } else {
+        this._drawPolyline(ctx, ax.vertices, "rgba(6, 182, 212, 0.90)", 2.1, [14, 5, 3, 5]);
       }
     }
     ctx.restore();
@@ -1828,10 +1956,16 @@ export class Viewer2D {
 
     // 3. Banner informativo en modo edición (situado en la parte inferior para despejar por completo la botonera superior)
     if (this.waypointMode) {
+      if (this.activeSnap) {
+        this._drawSnapIndicator(ctx, this.activeSnap);
+      }
       const modeLabel = this.trajectoryMode === "spline" ? "SPLINE CAD" : "POLILÍNEA CAD";
       const dirLabel = this.activeDrawDirection === -1 ? "◀ RETROCESO (R)" : "▶ AVANCE (D)";
       const sharpWarning = hasSharpCurvature ? ` · ⚠️ Radio cerrado (${minObservedR.toFixed(1)} m)` : "";
-      const bannerText = `✏️ [${modeLabel} · ${dirLabel}]: Clic añadir · Tecla R: invertir · Clic dcho. vértice: menú${sharpWarning}`;
+      const axisHint = (this.referenceAxes && this.referenceAxes.length > 0 && this.layers.referenceAxes)
+        ? " · Shift+Clic eje: adoptar · Alt: sin snap"
+        : "";
+      const bannerText = `✏️ [${modeLabel} · ${dirLabel}]: Clic añadir · Tecla R: invertir${axisHint}${sharpWarning}`;
       ctx.font = "600 11px 'Segoe UI', system-ui, sans-serif";
       const bw = ctx.measureText(bannerText).width + 24;
       const bx = (this.width - bw) / 2;

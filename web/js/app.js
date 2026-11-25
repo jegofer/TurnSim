@@ -32,7 +32,12 @@ import {
   detectSuggestedLayerMapping,
   buildScenarioFromDXF
 } from "./export/dxf_importer.js";
-import { buildScenarioFromGeoJSON } from "./export/geojson_importer.js";
+import {
+  buildScenarioFromGeoJSON,
+  inspectGeoJSONFile,
+  buildScenarioFromGeoJSONFiles,
+  buildPnoaConfigFromUtmOrigin
+} from "./export/geojson_importer.js";
 import { Viewer2D } from "./view2d/viewer2d.js";
 import { Viewer3D } from "./view3d/viewer3d.js";
 import { I18nManager } from "./i18n/locales.js";
@@ -119,8 +124,10 @@ export class SweptPathApp {
       segments: []
     };
     this.obstacles = [];
+    this.referenceAxes = [];
     this.cadBackgroundEntities = [];
     this.currentParsedDXF = null;
+    this.activeGeoOrigin = null;
 
     this.discretization = {
       straightStepM: 0.15,
@@ -131,8 +138,6 @@ export class SweptPathApp {
     this.viewMode = "2d"; // '2d' | '3d' | 'split'
     this.simResult = null;
     this.interferenceReport = null;
-    this.cadBackgroundEntities = [];
-    this.currentParsedDXF = null;
 
     // Estado de reproducción y temporizadores de recálculo
     this.isPlaying = false;
@@ -233,6 +238,10 @@ export class SweptPathApp {
       this.showToast(`Cúspide detectada en P${wpIndex + 1}: cambio automático a ${label}`, "info", 2600);
     };
 
+    this.viewer2D.onAdoptReferenceAxis = (axis, meta = {}) => {
+      this._adoptReferenceAxisAsWaypoints(axis, meta);
+    };
+
     this._initUI();
     this.history.pushState(this.getSnapshot());
     this._updateUndoRedoButtonsUI();
@@ -285,6 +294,7 @@ export class SweptPathApp {
       selectedScenarioId: this.selectedScenarioId,
       maneuver: JSON.parse(JSON.stringify(this.maneuver)),
       obstacles: JSON.parse(JSON.stringify(this.obstacles)),
+      referenceAxes: JSON.parse(JSON.stringify(this.referenceAxes || [])),
       safetyMarginM: this.safetyMarginM,
       discretization: JSON.parse(JSON.stringify(this.discretization))
     };
@@ -299,6 +309,9 @@ export class SweptPathApp {
     this.selectedScenarioId = s.selectedScenarioId || this.selectedScenarioId;
     this.maneuver = JSON.parse(JSON.stringify(s.maneuver));
     this.obstacles = JSON.parse(JSON.stringify(s.obstacles));
+    if (Array.isArray(s.referenceAxes)) {
+      this.referenceAxes = JSON.parse(JSON.stringify(s.referenceAxes));
+    }
     this.safetyMarginM = typeof s.safetyMarginM === "number" ? s.safetyMarginM : 0.30;
     if (s.discretization) {
       this.discretization = { ...this.discretization, ...s.discretization };
@@ -1179,7 +1192,9 @@ export class SweptPathApp {
           segments: []
         };
         this.obstacles = [];
+        this.referenceAxes = [];
         this.cadBackgroundEntities = [];
+        this.activeGeoOrigin = null;
         this._populateManeuverInputs();
         this._renderSegmentsListUI();
         this._renderObstaclesListUI();
@@ -1191,7 +1206,9 @@ export class SweptPathApp {
       this.safetyMarginM = sc.safetyMarginM;
       this.maneuver = JSON.parse(JSON.stringify(sc.maneuver));
       this.obstacles = JSON.parse(JSON.stringify(sc.obstacles));
+      this.referenceAxes = [];
       this.cadBackgroundEntities = [];
+      this.activeGeoOrigin = null;
       document.getElementById("inp-safety-margin").value = this.safetyMarginM;
       this._populateManeuverInputs();
       this._renderObstaclesListUI();
@@ -1663,6 +1680,7 @@ export class SweptPathApp {
       ["chk-layer-refs", "refTraces"],
       ["chk-layer-ghosts", "ghosts"],
       ["chk-layer-obstacles", "obstacles"],
+      ["chk-layer-ref-axes", "referenceAxes"],
       ["chk-layer-cad-bg", "cadBackground"],
       ["chk-layer-dims", "dimensions"],
       ["chk-layer-axles", "axlesAndPoints"],
@@ -1772,6 +1790,7 @@ export class SweptPathApp {
         obstacles: this.obstacles,
         layerVisibility: this.viewer2D.layers,
         cadBackgroundEntities: this.cadBackgroundEntities,
+        referenceAxes: this.referenceAxes,
         diligence: this._getDiligenceData()
       });
     });
@@ -2565,7 +2584,8 @@ export class SweptPathApp {
           simResult: this.simResult,
           obstacles: this.obstacles,
           interferenceReport: this.interferenceReport,
-          cadBackgroundEntities: this.cadBackgroundEntities
+          cadBackgroundEntities: this.cadBackgroundEntities,
+          referenceAxes: this.referenceAxes
         });
         this.viewer3D.updateObstaclesAndInterferences(this.obstacles, this.interferenceReport);
         this._updateTopTelemetryBar();
@@ -2584,6 +2604,7 @@ export class SweptPathApp {
     if (!this.maneuver || !this.maneuver.segments || this.maneuver.segments.length === 0) {
       const hasSceneContent =
         (this.cadBackgroundEntities && this.cadBackgroundEntities.length > 0) ||
+        (this.referenceAxes && this.referenceAxes.length > 0) ||
         (this.obstacles && this.obstacles.length > 0) ||
         (this.viewer2D && this.viewer2D.waypoints && this.viewer2D.waypoints.length > 0) ||
         (this.viewer2D && this.viewer2D.layers && this.viewer2D.layers.pnoa && this.viewer2D.pnoaConfig && this.viewer2D.pnoaConfig.enabled);
@@ -2606,7 +2627,8 @@ export class SweptPathApp {
           simResult: null,
           obstacles: [],
           interferenceReport: null,
-          cadBackgroundEntities: []
+          cadBackgroundEntities: [],
+          referenceAxes: []
         });
 
         this.viewer3D.setData({
@@ -2614,7 +2636,8 @@ export class SweptPathApp {
           simResult: null,
           obstacles: [],
           interferenceReport: null,
-          cadBackgroundEntities: []
+          cadBackgroundEntities: [],
+          referenceAxes: []
         });
 
         if (fitCamera) {
@@ -2658,7 +2681,8 @@ export class SweptPathApp {
         simResult: this.simResult,
         obstacles: this.obstacles,
         interferenceReport: null,
-        cadBackgroundEntities: this.cadBackgroundEntities
+        cadBackgroundEntities: this.cadBackgroundEntities,
+        referenceAxes: this.referenceAxes
       });
 
       this.viewer3D.setData({
@@ -2667,6 +2691,7 @@ export class SweptPathApp {
         obstacles: this.obstacles,
         interferenceReport: null,
         cadBackgroundEntities: this.cadBackgroundEntities,
+        referenceAxes: this.referenceAxes,
         waypoints: this.viewer2D?.waypoints
       });
 
@@ -2731,7 +2756,8 @@ export class SweptPathApp {
           simResult: this.simResult,
           obstacles: this.obstacles,
           interferenceReport: this.interferenceReport,
-          cadBackgroundEntities: this.cadBackgroundEntities
+          cadBackgroundEntities: this.cadBackgroundEntities,
+          referenceAxes: this.referenceAxes
         });
 
         const data3D = {
@@ -2740,6 +2766,7 @@ export class SweptPathApp {
           obstacles: this.obstacles,
           interferenceReport: this.interferenceReport,
           cadBackgroundEntities: this.cadBackgroundEntities,
+          referenceAxes: this.referenceAxes,
           waypoints: this.viewer2D?.waypoints
         };
         if (this.viewMode === "2d") {
@@ -2915,136 +2942,351 @@ export class SweptPathApp {
       dropZone.addEventListener("drop", (e) => {
         e.preventDefault();
         dropZone.classList.remove("dragover");
-        if (e.dataTransfer && e.dataTransfer.files && e.dataTransfer.files[0]) {
-          this._loadVectorFile(e.dataTransfer.files[0]);
+        if (e.dataTransfer && e.dataTransfer.files && e.dataTransfer.files.length > 0) {
+          this._loadVectorFiles(e.dataTransfer.files);
         }
       });
 
       fileInput.addEventListener("change", (e) => {
-        if (e.target.files && e.target.files[0]) {
-          this._loadVectorFile(e.target.files[0]);
+        if (e.target.files && e.target.files.length > 0) {
+          this._loadVectorFiles(e.target.files);
+          fileInput.value = "";
         }
       });
+    }
+  }
+
+  _loadVectorFiles(fileList) {
+    const files = Array.from(fileList || []).filter(Boolean);
+    if (files.length === 0) return;
+
+    const geoFiles = files.filter((f) => {
+      const n = (f.name || "").toLowerCase();
+      return n.endsWith(".geojson") || n.endsWith(".json");
+    });
+    const dxfFiles = files.filter((f) => (f.name || "").toLowerCase().endsWith(".dxf"));
+
+    if (geoFiles.length > 0) {
+      this._loadGeoJsonFiles(geoFiles);
+    } else if (dxfFiles.length > 0) {
+      this._loadDxfFile(dxfFiles[0]);
+    } else {
+      this._loadDxfFile(files[0]);
     }
   }
 
   _loadVectorFile(file) {
     if (!file) return;
-    const nameLower = (file.name || "").toLowerCase();
-    if (nameLower.endsWith(".geojson") || nameLower.endsWith(".json")) {
-      this._loadGeoJsonFile(file);
-    } else {
-      this._loadDxfFile(file);
+    this._loadVectorFiles([file]);
+  }
+
+  _readFileAsText(file) {
+    return new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = (e) => resolve(e.target.result);
+      reader.onerror = () => reject(new Error(`No se pudo leer el archivo ${file.name}.`));
+      reader.readAsText(file);
+    });
+  }
+
+  async _loadGeoJsonFiles(files) {
+    if (!files || files.length === 0) return;
+    try {
+      const inspected = [];
+      for (const file of files) {
+        const text = await this._readFileAsText(file);
+        inspected.push(inspectGeoJSONFile(text, file.name));
+      }
+      this._showGeoJsonImportModal(inspected);
+    } catch (err) {
+      console.error("Error al procesar archivo(s) GeoJSON:", err);
+      this.showToast(`Error al procesar GeoJSON: ${err.message}`, "danger");
     }
   }
 
-  _loadGeoJsonFile(file) {
-    if (!file) return;
-    const reader = new FileReader();
-    reader.onload = (e) => {
-      try {
-        const text = e.target.result;
-        const scenario = buildScenarioFromGeoJSON(text);
-
-        // 1. Registrar como escenario personalizado en el selector
-        this.selectedScenarioId = "custom_geojson";
-        const scSelect = document.getElementById("select-scenario");
-        if (scSelect) {
-          let customOpt = scSelect.querySelector("option[value='custom_geojson']");
-          if (!customOpt) {
-            customOpt = document.createElement("option");
-            customOpt.value = "custom_geojson";
-            scSelect.appendChild(customOpt);
-          }
-          customOpt.textContent = `GeoJSON: ${file.name}`;
-          scSelect.value = "custom_geojson";
-        }
-
-        // 2. Obstáculos y entidades de fondo CAD
-        this.obstacles = scenario.obstacles || [];
-        this._renderObstaclesListUI();
-        this.cadBackgroundEntities = scenario.backgroundEntities || [];
-
-        // 3. Maniobra (eje deducido o vehículo en reposo en el origen del plano)
-        if (scenario.maneuver && scenario.maneuver.segments && scenario.maneuver.segments.length > 0) {
-          this.maneuver = scenario.maneuver;
-          this.viewer2D.clearWaypoints(true);
-        } else {
-          this.maneuver = {
-            startPose: {
-              x: scenario.bounds ? Number((scenario.bounds.minX + 5).toFixed(2)) : 0,
-              y: scenario.bounds ? Number((scenario.bounds.minY + 5).toFixed(2)) : 0,
-              headingDeg: 0,
-              initialArticulationDeg: 0
-            },
-            segments: []
-          };
-          this.viewer2D.clearWaypoints(true);
-        }
-        this._populateManeuverInputs();
-        this._renderSegmentsListUI();
-
-        // 4. Georreferenciación recíproca con PNOA (IGN)
-        if (scenario.pnoaConfig) {
-          this.viewer2D.setPnoaConfig(scenario.pnoaConfig);
-          const chkPnoa = document.getElementById("chk-layer-pnoa");
-          if (chkPnoa) chkPnoa.checked = true;
-          const btnPnoa = document.getElementById("btn-toggle-pnoa");
-          if (btnPnoa) {
-            btnPnoa.classList.add("active");
-            btnPnoa.style.background = "rgba(2, 132, 199, 0.4)";
-          }
-          const modalLat = document.getElementById("inp-pnoa-lat");
-          const modalLon = document.getElementById("inp-pnoa-lon");
-          if (modalLat) modalLat.value = scenario.pnoaConfig.centerLat;
-          if (modalLon) modalLon.value = scenario.pnoaConfig.centerLon;
-        }
-
-        // 5. Asignar inmediatamente a los visores 2D y 3D
-        this.viewer2D.setData({
-          vehicle: this.vehicle,
-          simResult: this.simResult,
-          obstacles: this.obstacles,
-          interferenceReport: this.interferenceReport,
-          cadBackgroundEntities: this.cadBackgroundEntities
-        });
-
-        this.viewer3D.setData({
-          vehicle: this.vehicle,
-          simResult: this.simResult,
-          obstacles: this.obstacles,
-          interferenceReport: this.interferenceReport,
-          cadBackgroundEntities: this.cadBackgroundEntities,
-          waypoints: this.viewer2D?.waypoints
-        });
-
-        // 6. Recalcular simulación cinemática o encuadrar en reposo
-        if (this.maneuver && this.maneuver.segments && this.maneuver.segments.length > 0) {
-          this.recomputeAll(true);
-        } else {
-          this.recomputeAll(false);
-          this.viewer2D.fitToScene();
-          this.viewer3D.fitToScene();
-        }
-
-        this.history.pushState(this.getSnapshot());
-        this._updateUndoRedoButtonsUI();
-
-        const totalEnts = this.obstacles.length + this.cadBackgroundEntities.length;
-        this.showToast(
-          `Plano GeoJSON cargado (${totalEnts} elementos). Ortofoto aérea oficial PNOA georreferenciada y activada.`,
-          "success",
-          4000
-        );
-      } catch (err) {
-        console.error("Error al procesar archivo GeoJSON:", err);
-        this.showToast(`Error al procesar el archivo GeoJSON: ${err.message}`, "danger");
+  _applyPnoaConfigToUI(pnoaConfig) {
+    if (!pnoaConfig) return;
+    this.viewer2D.setPnoaConfig(pnoaConfig);
+    const chkPnoa = document.getElementById("chk-layer-pnoa");
+    if (chkPnoa) chkPnoa.checked = Boolean(pnoaConfig.enabled);
+    const btnPnoa = document.getElementById("btn-toggle-pnoa");
+    if (btnPnoa) {
+      if (pnoaConfig.enabled) {
+        btnPnoa.classList.add("active");
+        btnPnoa.style.background = "rgba(2, 132, 199, 0.4)";
+      } else {
+        btnPnoa.classList.remove("active");
+        btnPnoa.style.background = "";
       }
+    }
+    const modalLat = document.getElementById("inp-pnoa-lat");
+    const modalLon = document.getElementById("inp-pnoa-lon");
+    if (modalLat) modalLat.value = pnoaConfig.centerLat;
+    if (modalLon) modalLon.value = pnoaConfig.centerLon;
+  }
+
+  _showGeoJsonImportModal(inspectedFiles) {
+    const existing = document.getElementById("geojson-modal-container");
+    if (existing) existing.remove();
+
+    const backdrop = document.createElement("div");
+    backdrop.id = "geojson-modal-container";
+    backdrop.className = "modal-backdrop";
+    backdrop.setAttribute("role", "dialog");
+    backdrop.setAttribute("aria-modal", "true");
+    backdrop.setAttribute("aria-labelledby", "modal-geojson-title");
+
+    const hasAnyUtm = inspectedFiles.some((f) => f.isUtm);
+    const canAppend = Boolean(
+      this.activeGeoOrigin &&
+      ((this.obstacles && this.obstacles.length > 0) ||
+       (this.referenceAxes && this.referenceAxes.length > 0) ||
+       (this.cadBackgroundEntities && this.cadBackgroundEntities.length > 0))
+    );
+
+    const roleOptions = [
+      ["reference_axes", "Ejes viales de referencia (guía + snap)"],
+      ["obstacles", "Obstáculos físicos (colisión)"],
+      ["boundaries", "Bordes de calzada / bordillos"],
+      ["restricted", "Zonas restringidas / excluidas"],
+      ["background", "Fondo contextual (solo visual)"],
+      ["auto", "Detección automática por propiedades"]
+    ];
+
+    const rowsHtml = inspectedFiles.map((info, idx) => {
+      const geomSummary = Object.entries(info.geomCounts || {})
+        .map(([k, v]) => `${v} ${k}`)
+        .join(", ");
+      const crsLabel = info.isUtm ? "UTM" : "WGS84";
+      const opts = roleOptions
+        .map(([val, lbl]) => `<option value="${val}" ${info.suggestedRole === val ? "selected" : ""}>${escapeHTML(lbl)}</option>`)
+        .join("");
+      return `
+        <div class="layer-field-row" style="margin-bottom:10px;padding:8px;background:rgba(15,23,42,0.55);border:1px solid #334155;border-radius:6px;">
+          <div class="layer-field-label" style="margin-bottom:4px;">
+            <span style="font-weight:600;color:#e2e8f0;">📄 ${escapeHTML(info.fileName)}</span>
+            <span class="layer-match-badge">${info.featureCount} ent. · ${crsLabel}</span>
+          </div>
+          <div style="font-size:10.5px;color:#94a3b8;margin-bottom:6px;">Geometrías: ${escapeHTML(geomSummary || "Ninguna")}</div>
+          <select id="modal-geojson-role-${idx}" style="width:100%;">${opts}</select>
+        </div>
+      `;
+    }).join("");
+
+    backdrop.innerHTML = `
+      <div class="modal-dialog">
+        <div class="modal-header">
+          <h3 id="modal-geojson-title">🌍 Importación GIS GeoJSON (${inspectedFiles.length} archivo${inspectedFiles.length > 1 ? "s" : ""})</h3>
+          <button type="button" class="btn btn-sm btn-outline" id="btn-geojson-modal-close" aria-label="Cerrar ventana">✕</button>
+        </div>
+        <div class="modal-body">
+          <p style="margin-top:0;margin-bottom:12px;color:#94a3b8;font-size:11px;">
+            Todos los archivos seleccionados se proyectarán sobre un <strong>origen georreferenciado común</strong> alineado con la ortofoto PNOA. Confirme el rol de cada archivo:
+          </p>
+          ${rowsHtml}
+          ${hasAnyUtm ? `
+            <div class="form-row" style="margin-top:10px;">
+              <div>
+                <label class="form-label" for="modal-geojson-utm-zone">Huso UTM (ETRS89 España)</label>
+                <select id="modal-geojson-utm-zone" style="width:100%;">
+                  <option value="28">Huso 28 (Canarias)</option>
+                  <option value="29">Huso 29 (Galicia / Oeste)</option>
+                  <option value="30" selected>Huso 30 (Centro / Península)</option>
+                  <option value="31">Huso 31 (Cataluña / Baleares)</option>
+                </select>
+              </div>
+            </div>
+          ` : ""}
+          ${canAppend ? `
+            <div style="margin-top:10px;padding:8px;background:rgba(6,182,212,0.1);border:1px solid rgba(6,182,212,0.35);border-radius:6px;">
+              <label style="display:flex;align-items:center;gap:8px;font-size:11.5px;color:#e2e8f0;cursor:pointer;">
+                <input type="checkbox" id="modal-geojson-append" checked />
+                <span>Añadir a la escena actual (conservar capas y origen georreferenciado existentes)</span>
+              </label>
+            </div>
+          ` : ""}
+        </div>
+        <div class="modal-footer">
+          <button type="button" class="btn btn-outline btn-sm" id="btn-geojson-modal-cancel">Cancelar</button>
+          <button type="button" class="btn btn-primary btn-sm" id="btn-geojson-modal-apply">✓ Cargar capas GeoJSON</button>
+        </div>
+      </div>
+    `;
+
+    document.body.appendChild(backdrop);
+
+    const onKeydownModal = (e) => {
+      if (e.key === "Escape") closeModal();
     };
-    reader.onerror = () => {
-      this.showToast("No se pudo leer el archivo GeoJSON seleccionado.", "danger");
+    window.addEventListener("keydown", onKeydownModal);
+    const closeModal = () => {
+      window.removeEventListener("keydown", onKeydownModal);
+      backdrop.remove();
     };
-    reader.readAsText(file);
+
+    document.getElementById("btn-geojson-modal-close").addEventListener("click", closeModal);
+    document.getElementById("btn-geojson-modal-cancel").addEventListener("click", closeModal);
+
+    document.getElementById("btn-geojson-modal-apply").addEventListener("click", () => {
+      try {
+        const utmZoneEl = document.getElementById("modal-geojson-utm-zone");
+        const utmZone = utmZoneEl ? parseInt(utmZoneEl.value, 10) || 30 : 30;
+        const appendEl = document.getElementById("modal-geojson-append");
+        const appendMode = Boolean(appendEl && appendEl.checked && this.activeGeoOrigin);
+
+        const entries = inspectedFiles.map((info, idx) => ({
+          fileName: info.fileName,
+          features: info.features,
+          role: document.getElementById(`modal-geojson-role-${idx}`)?.value || info.suggestedRole || "auto"
+        }));
+
+        const scenario = buildScenarioFromGeoJSONFiles(entries, {
+          utmZone,
+          sharedOrigin: appendMode ? this.activeGeoOrigin : null
+        });
+
+        this._applyGeoJsonScenario(scenario, inspectedFiles.map((f) => f.fileName), appendMode);
+        closeModal();
+      } catch (err) {
+        console.error("Error al aplicar capas GeoJSON:", err);
+        this.showToast(`Error al cargar GeoJSON: ${err.message}`, "danger");
+      }
+    });
+  }
+
+  _applyGeoJsonScenario(scenario, fileNames = [], appendMode = false) {
+    this.selectedScenarioId = "custom_geojson";
+    const scSelect = document.getElementById("select-scenario");
+    if (scSelect) {
+      let customOpt = scSelect.querySelector("option[value='custom_geojson']");
+      if (!customOpt) {
+        customOpt = document.createElement("option");
+        customOpt.value = "custom_geojson";
+        scSelect.appendChild(customOpt);
+      }
+      const label = fileNames.length > 1 ? `GeoJSON (${fileNames.length} capas)` : `GeoJSON: ${fileNames[0] || "Escenario"}`;
+      customOpt.textContent = label;
+      scSelect.value = "custom_geojson";
+    }
+
+    if (appendMode) {
+      this.obstacles = [...(this.obstacles || []), ...(scenario.obstacles || [])];
+      this.referenceAxes = [...(this.referenceAxes || []), ...(scenario.referenceAxes || [])];
+      this.cadBackgroundEntities = [...(this.cadBackgroundEntities || []), ...(scenario.backgroundEntities || [])];
+    } else {
+      this.obstacles = scenario.obstacles || [];
+      this.referenceAxes = scenario.referenceAxes || [];
+      this.cadBackgroundEntities = scenario.backgroundEntities || [];
+      this.activeGeoOrigin = scenario.sharedOrigin || null;
+    }
+
+    this._renderObstaclesListUI();
+
+    if (!appendMode) {
+      if (scenario.maneuver && scenario.maneuver.segments && scenario.maneuver.segments.length > 0) {
+        this.maneuver = scenario.maneuver;
+        this.viewer2D.clearWaypoints(true);
+      } else {
+        this.maneuver = {
+          startPose: {
+            x: scenario.bounds ? Number((scenario.bounds.minX + 5).toFixed(2)) : 0,
+            y: scenario.bounds ? Number((scenario.bounds.minY + 5).toFixed(2)) : 0,
+            headingDeg: 0,
+            initialArticulationDeg: 0
+          },
+          segments: []
+        };
+        this.viewer2D.clearWaypoints(true);
+      }
+      this._populateManeuverInputs();
+      this._renderSegmentsListUI();
+      if (scenario.pnoaConfig) {
+        this._applyPnoaConfigToUI(scenario.pnoaConfig);
+      }
+    }
+
+    this.viewer2D.setData({
+      vehicle: this.vehicle,
+      simResult: this.simResult,
+      obstacles: this.obstacles,
+      interferenceReport: this.interferenceReport,
+      cadBackgroundEntities: this.cadBackgroundEntities,
+      referenceAxes: this.referenceAxes
+    });
+
+    this.viewer3D.setData({
+      vehicle: this.vehicle,
+      simResult: this.simResult,
+      obstacles: this.obstacles,
+      interferenceReport: this.interferenceReport,
+      cadBackgroundEntities: this.cadBackgroundEntities,
+      referenceAxes: this.referenceAxes,
+      waypoints: this.viewer2D?.waypoints
+    });
+
+    if (this.maneuver && this.maneuver.segments && this.maneuver.segments.length > 0) {
+      this.recomputeAll(!appendMode);
+    } else {
+      this.recomputeAll(false);
+      this.viewer2D.fitToScene();
+      this.viewer3D.fitToScene();
+    }
+
+    this.history.pushState(this.getSnapshot());
+    this._updateUndoRedoButtonsUI();
+
+    const axesCount = this.referenceAxes.length;
+    const obsCount = this.obstacles.length;
+    const bgCount = this.cadBackgroundEntities.length;
+    this.showToast(
+      `GeoJSON ${appendMode ? "añadido" : "cargado"}: ${axesCount} ejes de referencia, ${obsCount} obstáculos, ${bgCount} elem. de fondo. Ortofoto PNOA alineada.`,
+      "success",
+      4500
+    );
+  }
+
+  _adoptReferenceAxisAsWaypoints(axis, meta = {}) {
+    if (!axis || !Array.isArray(axis.vertices) || axis.vertices.length < 2) return;
+    let pts = axis.vertices.map(([x, y]) => [Number(x), Number(y)]);
+
+    // Orientar el eje desde el extremo más cercano al punto donde hizo Shift+Clic el usuario
+    if (Array.isArray(meta.clickWorld) && meta.clickWorld.length >= 2) {
+      const [cx, cy] = meta.clickWorld;
+      const dStart = Math.hypot(pts[0][0] - cx, pts[0][1] - cy);
+      const dEnd = Math.hypot(pts[pts.length - 1][0] - cx, pts[pts.length - 1][1] - cy);
+      if (dEnd < dStart) {
+        pts = pts.reverse();
+      }
+    }
+
+    // Simplificar si el eje CAD/GIS viene hiper-densificado (> 40 vértices) preservando puntos clave
+    if (pts.length > 40) {
+      const reduced = [pts[0]];
+      let accum = 0;
+      for (let i = 1; i < pts.length - 1; i++) {
+        accum += Math.hypot(pts[i][0] - pts[i - 1][0], pts[i][1] - pts[i - 1][1]);
+        if (accum >= 3.0) {
+          reduced.push(pts[i]);
+          accum = 0;
+        }
+      }
+      reduced.push(pts[pts.length - 1]);
+      pts = reduced;
+    }
+
+    const dir = this.viewer2D?.activeDrawDirection === -1 ? -1 : 1;
+    const wps = pts.map(([x, y]) => ({
+      x: Number(x.toFixed(2)),
+      y: Number(y.toFixed(2)),
+      direction: dir,
+      directionExplicit: false
+    }));
+
+    this.viewer2D.setWaypoints(wps);
+    if (typeof this.viewer2D.onWaypointsChange === "function") {
+      this.viewer2D.onWaypointsChange(wps, { isDragging: false });
+    }
+    this.showToast(`Eje «${axis.name || axis.layer}» adoptado como trayectoria (${wps.length} vértices).`, "success", 3000);
   }
 
   _loadDxfFile(file) {
@@ -3106,67 +3348,95 @@ export class SweptPathApp {
       return html;
     };
 
+    const refAxesMatchBadge = (suggested.referenceAxisLayers && suggested.referenceAxisLayers.length > 0)
+      ? `<span class="layer-match-badge">✓ ${suggested.referenceAxisLayers.length} capa(s) de ejes</span>`
+      : "";
+
     const trajMatchBadge = suggested.trajectoryLayer
       ? `<span class="layer-match-badge">✓ Detectada automáticamente</span>`
-      : `<span style="font-size:10px;color:#f59e0b;">Selección requerida o manual</span>`;
+      : `<span style="font-size:10px;color:#94a3b8;">Opcional (recomendado usar Ejes de referencia + Trazar ruta)</span>`;
 
     const obsMatchBadge = suggested.obstacleLayers.length > 0
       ? `<span class="layer-match-badge">✓ ${suggested.obstacleLayers.length} capa(s) sugeridas</span>`
       : "";
+
+    // Detectar si las coordenadas del DXF parecen UTM (ETRS89 España) para ofrecer alineación PNOA
+    let rawMinX = Infinity, rawMaxX = -Infinity, rawMinY = Infinity, rawMaxY = -Infinity;
+    const scalePreview = parsedDxf.suggestedScale || 1.0;
+    for (const ent of parsedDxf.entities || []) {
+      for (const pt of ent.vertices || []) {
+        const vx = pt[0] * scalePreview;
+        const vy = pt[1] * scalePreview;
+        if (vx < rawMinX) rawMinX = vx;
+        if (vx > rawMaxX) rawMaxX = vx;
+        if (vy < rawMinY) rawMinY = vy;
+        if (vy > rawMaxY) rawMaxY = vy;
+      }
+    }
+    const midX = 0.5 * (rawMinX + rawMaxX);
+    const midY = 0.5 * (rawMinY + rawMaxY);
+    const isUtmPreview = Number.isFinite(midX) && midX > 100000 && midX < 900000 && midY > 3000000 && midY < 5500000;
+
+    // Lista de capas candidatas a fondo contextual (todas con checkbox marcado por defecto)
+    const assignedSet = new Set([
+      ...(suggested.referenceAxisLayers || []),
+      ...(suggested.obstacleLayers || []),
+      ...(suggested.boundaryLayers || []),
+      ...(suggested.restrictedLayers || []),
+      ...(suggested.trajectoryLayer ? [suggested.trajectoryLayer] : [])
+    ]);
+    const bgLayersHtml = layers.map((l) => {
+      const stats = parsedDxf.layerStats[l];
+      const count = stats ? stats.count : 0;
+      const safeL = escapeHTML(l);
+      const isSpecial = assignedSet.has(l);
+      return `
+        <label style="display:flex;align-items:center;gap:6px;font-size:11px;color:${isSpecial ? "#64748b" : "#cbd5e1"};padding:2px 0;cursor:pointer;">
+          <input type="checkbox" class="modal-bg-layer-chk" value="${safeL}" checked />
+          <span>${safeL}</span>
+          <span style="color:#64748b;font-size:10px;">(${count} ent.)</span>
+        </label>
+      `;
+    }).join("");
 
     backdrop.setAttribute("role", "dialog");
     backdrop.setAttribute("aria-modal", "true");
     backdrop.setAttribute("aria-labelledby", "modal-dxf-title");
 
     backdrop.innerHTML = `
-      <div class="modal-dialog">
+      <div class="modal-dialog" style="max-height:88vh;display:flex;flex-direction:column;">
         <div class="modal-header">
           <h3 id="modal-dxf-title">📂 Importación de plano CAD DXF: ${escapeHTML(fileName)}</h3>
           <button type="button" class="btn btn-sm btn-outline" id="btn-modal-close" aria-label="Cerrar ventana">✕</button>
         </div>
-        <div class="modal-body">
+        <div class="modal-body" style="overflow-y:auto;">
           <p style="margin-top:0;margin-bottom:12px;color:#94a3b8;font-size:11px;">
             TurnSim ha analizado el plano y ha asignado las capas que coinciden con la plantilla técnica recomendada.
             Puede confirmar o modificar la correspondencia de capas desde los desplegables:
           </p>
 
-          <!-- 1. EJE DE TRAYECTORIA -->
+          <!-- 1. EJES VIALES DE REFERENCIA (GUÍA Y SNAP) -->
           <div class="layer-field-row">
             <div class="layer-field-label">
-              <span>Eje / trayectoria del camión:</span>
-              ${trajMatchBadge}
+              <span>Ejes viales de referencia (guía visual + snap magnético):</span>
+              ${refAxesMatchBadge}
             </div>
-            <select id="modal-sel-trajectory" style="width:100%;">
-              ${buildOptions(suggested.trajectoryLayer, "-- No importar trayectoria (conservar actual) --")}
+            <select id="modal-sel-ref-axes" multiple size="3" style="width:100%;background:#0b1120;color:#f8fafc;border:1px solid #0891b2;border-radius:4px;padding:4px;">
+              ${buildMultiOptions(suggested.referenceAxisLayers || [])}
             </select>
-            <div class="layer-desc-hint">Polilínea o sucesión de aristas que debe recorrer el eje motriz de la tractora.</div>
-          </div>
-
-          <!-- Sentido y radio de acuerdo -->
-          <div class="form-row" style="margin-bottom:12px;">
-            <div>
-              <label class="form-label" for="modal-sel-dir">Sentido de marcha</label>
-              <select id="modal-sel-dir" style="width:100%;">
-                <option value="1" selected>Avance (sentido de dibujo)</option>
-                <option value="-1">Marcha atrás (retroceso)</option>
-              </select>
-            </div>
-            <div>
-              <label class="form-label" for="modal-inp-agreement">Radio mínimo de acuerdo (m)</label>
-              <input type="number" id="modal-inp-agreement" value="12.5" step="0.5" min="5" max="50" style="width:100%;" />
-            </div>
+            <div class="layer-desc-hint">Se muestran en cian eje-punto; al trazar ruta permiten imantar vértices y adoptar un eje con Shift+Clic.</div>
           </div>
 
           <!-- 2. OBSTÁCULOS Y EDIFICIOS -->
           <div class="layer-field-row">
             <div class="layer-field-label">
-              <span>Obstáculos físicos / edificaciones:</span>
+              <span>Obstáculos físicos / envolventes / edificaciones:</span>
               ${obsMatchBadge}
             </div>
             <select id="modal-sel-obstacles" multiple size="3" style="width:100%;background:#0b1120;color:#f8fafc;border:1px solid #334155;border-radius:4px;padding:4px;">
               ${buildMultiOptions(suggested.obstacleLayers)}
             </select>
-            <div class="layer-desc-hint">Elementos que provocan colisión física (mantenga pulsado Ctrl/Cmd para selección múltiple).</div>
+            <div class="layer-desc-hint">Líneas abiertas o polígonos que provocan colisión física (Ctrl/Cmd para selección múltiple).</div>
           </div>
 
           <!-- 3. BORDILLOS Y DELIMITACIONES -->
@@ -3188,11 +3458,70 @@ export class SweptPathApp {
               ${buildMultiOptions(suggested.restrictedLayers)}
             </select>
           </div>
+
+          <!-- 5. EJE DE TRAYECTORIA DIRECTA (OPCIONAL) -->
+          <div class="layer-field-row">
+            <div class="layer-field-label">
+              <span>Trayectoria automática única (opcional):</span>
+              ${trajMatchBadge}
+            </div>
+            <select id="modal-sel-trajectory" style="width:100%;">
+              ${buildOptions(suggested.trajectoryLayer, "-- No importar trayectoria automática (trazar manualmente sobre el plano) --")}
+            </select>
+          </div>
+
+          <!-- Sentido y radio de acuerdo -->
+          <div class="form-row" style="margin-bottom:12px;">
+            <div>
+              <label class="form-label" for="modal-sel-dir">Sentido de marcha</label>
+              <select id="modal-sel-dir" style="width:100%;">
+                <option value="1" selected>Avance (sentido de dibujo)</option>
+                <option value="-1">Marcha atrás (retroceso)</option>
+              </select>
+            </div>
+            <div>
+              <label class="form-label" for="modal-inp-agreement">Radio mínimo de acuerdo (m)</label>
+              <input type="number" id="modal-inp-agreement" value="12.5" step="0.5" min="5" max="50" style="width:100%;" />
+            </div>
+          </div>
+
+          ${isUtmPreview ? `
+            <!-- GEORREFERENCIACIÓN UTM -> PNOA -->
+            <div class="layer-field-row" style="padding:8px;background:rgba(6,182,212,0.1);border:1px solid rgba(6,182,212,0.35);border-radius:6px;">
+              <label style="display:flex;align-items:center;gap:8px;font-size:11.5px;color:#e2e8f0;cursor:pointer;margin-bottom:6px;">
+                <input type="checkbox" id="modal-dxf-enable-pnoa" checked />
+                <span>🛰️ Coordenadas UTM detectadas: alinear ortofoto aérea PNOA (ETRS89)</span>
+              </label>
+              <div style="display:flex;align-items:center;gap:8px;">
+                <label class="form-label" for="modal-dxf-utm-zone" style="margin:0;white-space:nowrap;">Huso UTM:</label>
+                <select id="modal-dxf-utm-zone" style="flex:1;">
+                  <option value="28">Huso 28 (Canarias)</option>
+                  <option value="29">Huso 29 (Galicia / Oeste)</option>
+                  <option value="30" selected>Huso 30 (Centro / Península)</option>
+                  <option value="31">Huso 31 (Cataluña / Baleares)</option>
+                </select>
+              </div>
+            </div>
+          ` : ""}
+
+          <!-- 6. RESTO DE CAPAS CONTEXTUALES -->
+          <details style="margin-top:8px;border:1px solid #334155;border-radius:6px;padding:6px 8px;background:rgba(15,23,42,0.45);">
+            <summary style="cursor:pointer;font-size:11.5px;font-weight:600;color:#cbd5e1;">
+              Capas contextuales de fondo (desmarque las que desee omitir)
+            </summary>
+            <div style="display:flex;gap:8px;margin:6px 0;">
+              <button type="button" class="btn btn-xs btn-outline" id="btn-bg-layers-all">Todas</button>
+              <button type="button" class="btn btn-xs btn-outline" id="btn-bg-layers-none">Ninguna</button>
+            </div>
+            <div style="max-height:120px;overflow-y:auto;padding-right:4px;">
+              ${bgLayersHtml}
+            </div>
+          </details>
         </div>
 
         <div class="modal-footer">
           <button type="button" class="btn btn-outline btn-sm" id="btn-modal-cancel">Cancelar</button>
-          <button type="button" class="btn btn-primary btn-sm" id="btn-modal-apply">✓ Aplicar plano y simular</button>
+          <button type="button" class="btn btn-primary btn-sm" id="btn-modal-apply">✓ Aplicar plano</button>
         </div>
       </div>
     `;
@@ -3213,25 +3542,40 @@ export class SweptPathApp {
     document.getElementById("btn-modal-close").addEventListener("click", closeModal);
     document.getElementById("btn-modal-cancel").addEventListener("click", closeModal);
 
+    document.getElementById("btn-bg-layers-all")?.addEventListener("click", () => {
+      backdrop.querySelectorAll(".modal-bg-layer-chk").forEach((c) => { c.checked = true; });
+    });
+    document.getElementById("btn-bg-layers-none")?.addEventListener("click", () => {
+      backdrop.querySelectorAll(".modal-bg-layer-chk").forEach((c) => { c.checked = false; });
+    });
+
     document.getElementById("btn-modal-apply").addEventListener("click", () => {
       const trajLayer = document.getElementById("modal-sel-trajectory").value || null;
 
       const getSelected = (selId) => {
         const el = document.getElementById(selId);
-        return Array.from(el.selectedOptions).map((o) => o.value);
+        return el ? Array.from(el.selectedOptions).map((o) => o.value) : [];
       };
 
+      const refAxisLayers = getSelected("modal-sel-ref-axes");
       const obsLayers = getSelected("modal-sel-obstacles");
       const bndLayers = getSelected("modal-sel-boundaries");
       const rstLayers = getSelected("modal-sel-restricted");
+      const excludedBackgroundLayers = Array.from(backdrop.querySelectorAll(".modal-bg-layer-chk"))
+        .filter((c) => !c.checked)
+        .map((c) => c.value);
       const direction = parseInt(document.getElementById("modal-sel-dir").value, 10) || 1;
       const agreementRadius = parseFloat(document.getElementById("modal-inp-agreement").value) || 12.5;
+      const enablePnoa = Boolean(document.getElementById("modal-dxf-enable-pnoa")?.checked);
+      const utmZone = parseInt(document.getElementById("modal-dxf-utm-zone")?.value, 10) || 30;
 
       const mapping = {
         trajectoryLayer: trajLayer,
+        referenceAxisLayers: refAxisLayers,
         obstacleLayers: obsLayers,
         boundaryLayers: bndLayers,
-        restrictedLayers: rstLayers
+        restrictedLayers: rstLayers,
+        excludedBackgroundLayers
       };
 
       try {
@@ -3243,11 +3587,10 @@ export class SweptPathApp {
 
         if (scenario.maneuver && scenario.maneuver.segments && scenario.maneuver.segments.length > 0) {
           this.maneuver = scenario.maneuver;
+          this.viewer2D.clearWaypoints(true);
           this._populateManeuverInputs();
           this._renderSegmentsListUI();
         } else {
-          // Si el plano no incluye capa de trayectoria, se limpia la maniobra previa
-          // para dejar el plano CAD listo en el visor para trazar la ruta con ✏️ Trazar ruta
           this.maneuver = {
             startPose: {
               x: scenario.bounds ? Number((scenario.bounds.minX + 5).toFixed(2)) : 0,
@@ -3257,6 +3600,7 @@ export class SweptPathApp {
             },
             segments: []
           };
+          this.viewer2D.clearWaypoints(true);
           this.simResult = null;
           this.interferenceReport = null;
           this._populateManeuverInputs();
@@ -3264,17 +3608,37 @@ export class SweptPathApp {
         }
 
         this.obstacles = scenario.obstacles || [];
+        this.referenceAxes = scenario.referenceAxes || [];
+        this.cadBackgroundEntities = scenario.backgroundEntities || [];
         this._renderObstaclesListUI();
 
-        this.cadBackgroundEntities = scenario.backgroundEntities || [];
+        // Alineación PNOA si el DXF viene en UTM y el usuario la activó
+        let pnoaAligned = false;
+        if (enablePnoa && scenario.originOffset && scenario.isUtmLikely) {
+          const pnoaCfg = buildPnoaConfigFromUtmOrigin(scenario.originOffset, utmZone);
+          if (pnoaCfg) {
+            this._applyPnoaConfigToUI(pnoaCfg);
+            this.activeGeoOrigin = {
+              isUtm: true,
+              utmZone,
+              utmCenterX: scenario.originOffset.x,
+              utmCenterY: scenario.originOffset.y,
+              centerLon: pnoaCfg.centerLon,
+              centerLat: pnoaCfg.centerLat
+            };
+            pnoaAligned = true;
+          }
+        } else {
+          this.activeGeoOrigin = null;
+        }
 
-        // Asignar inmediatamente los datos a los visores para renderizado instantáneo del plano CAD
         this.viewer2D.setData({
           vehicle: this.vehicle,
           simResult: this.simResult,
           obstacles: this.obstacles,
           interferenceReport: this.interferenceReport,
-          cadBackgroundEntities: this.cadBackgroundEntities
+          cadBackgroundEntities: this.cadBackgroundEntities,
+          referenceAxes: this.referenceAxes
         });
 
         this.viewer3D.setData({
@@ -3283,20 +3647,24 @@ export class SweptPathApp {
           obstacles: this.obstacles,
           interferenceReport: this.interferenceReport,
           cadBackgroundEntities: this.cadBackgroundEntities,
+          referenceAxes: this.referenceAxes,
           waypoints: this.viewer2D?.waypoints
         });
 
         closeModal();
 
-        // Si hay una maniobra válida, ejecutar simulación cinemática completa
         if (this.maneuver && this.maneuver.segments && this.maneuver.segments.length > 0) {
           this.recomputeAll(true);
         } else {
           this.viewer2D.fitToScene();
           this.viewer3D.fitToScene();
           this._updateTopTelemetryBar();
-          const totalEnts = this.cadBackgroundEntities.length + this.obstacles.length;
-          this.showToast(`Plano CAD cargado con éxito (${totalEnts} elementos geométricos). Puede trazar una ruta sobre el plano con el botón ✏️ Trazar ruta.`, "success");
+          const pnoaMsg = pnoaAligned ? " Ortofoto PNOA alineada." : "";
+          this.showToast(
+            `Plano DXF cargado: ${this.referenceAxes.length} ejes de referencia, ${this.obstacles.length} obstáculos, ${this.cadBackgroundEntities.length} elem. de fondo.${pnoaMsg}`,
+            "success",
+            4500
+          );
         }
       } catch (err) {
         console.error("Error al construir escenario desde DXF:", err);

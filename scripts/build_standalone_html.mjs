@@ -263,10 +263,10 @@ ${cssContent}
           <!-- ETAPA 1: ESCENARIO Y CAD -->
           <div class="stage-section-block" id="stage-block-1">
             <!-- Zona de Carga de archivo CAD DXF / GIS GeoJSON -->
-            <div id="dxf-drop-zone" class="dxf-drop-zone" title="Arrastre aquí un archivo .dxf o .geojson, o haga clic para seleccionarlo">
+            <div id="dxf-drop-zone" class="dxf-drop-zone" title="Arrastre aquí un archivo .dxf o uno o varios archivos .geojson, o haga clic para seleccionarlos">
               <div class="dxf-drop-title" data-i18n="dxf_drop_title">📂 Cargar plano CAD o GIS (.DXF, .GeoJSON)</div>
-              <div class="dxf-drop-hint" data-i18n="dxf_drop_hint">Arrastre su archivo DXF o GeoJSON con cartografía, o haga clic para examinar</div>
-              <input type="file" id="inp-dxf-file" accept=".dxf,.geojson,.json" style="display:none;" />
+              <div class="dxf-drop-hint" data-i18n="dxf_drop_hint">Arrastre un DXF multicapa o 1 o varios GeoJSON (ejes + obstáculos), o haga clic para examinar</div>
+              <input type="file" id="inp-dxf-file" accept=".dxf,.geojson,.json" multiple style="display:none;" />
             </div>
 
             <div class="form-group" style="margin-top:10px;">
@@ -507,6 +507,7 @@ ${cssContent}
                   <label class="layer-check"><input type="checkbox" id="chk-layer-refs" checked /> Trazas ejes ref.</label>
                   <label class="layer-check"><input type="checkbox" id="chk-layer-ghosts" checked /> Siluetas paso</label>
                   <label class="layer-check"><input type="checkbox" id="chk-layer-obstacles" checked /> Obstáculos viarios</label>
+                  <label class="layer-check"><input type="checkbox" id="chk-layer-ref-axes" checked /> Ejes viales de referencia</label>
                   <label class="layer-check"><input type="checkbox" id="chk-layer-cad-bg" checked /> Plano fondo CAD</label>
                   <label class="layer-check"><input type="checkbox" id="chk-layer-dims" checked /> Cotas y holguras</label>
                   <label class="layer-check"><input type="checkbox" id="chk-layer-axles" checked /> Ruedas y kingpin</label>

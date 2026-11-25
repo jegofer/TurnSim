@@ -2056,6 +2056,139 @@ let simTrackingForRateTest = null;
   );
 }
 
+// ---------------------------------------------------------------------------
+// TEST-47: Importación CAD DXF multicapa (EJES_VIALES, OBSTACULOS_ENVOLVENTES,
+//          filtro de capas contextuales y alineación UTM-PNOA) y carga múltiple
+//          de GeoJSON con origen compartido y modo aditivo
+// ---------------------------------------------------------------------------
+{
+  const {
+    parseDXF,
+    detectSuggestedLayerMapping,
+    buildScenarioFromDXF
+  } = await import("../web/js/export/dxf_importer.js");
+  const {
+    inspectGeoJSONFile,
+    buildScenarioFromGeoJSONFiles,
+    buildPnoaConfigFromUtmOrigin
+  } = await import("../web/js/export/geojson_importer.js");
+
+  // 1. DXF multicapa sintético en UTM Huso 30 (Madrid)
+  const ux = 425000;
+  const uy = 4471000;
+  const dxfUtm = [
+    "0", "SECTION", "2", "ENTITIES",
+    // Dos ejes viales en EJES_VIALES
+    "0", "LINE", "8", "EJES_VIALES", "10", `${ux}`, "20", `${uy}`, "11", `${ux + 40}`, "21", `${uy}`,
+    "0", "LINE", "8", "EJES_VIALES", "10", `${ux + 20}`, "20", `${uy - 20}`, "11", `${ux + 20}`, "21", `${uy + 20}`,
+    // Un obstáculo línea abierta en OBSTACULOS_ENVOLVENTES
+    "0", "LINE", "8", "OBSTACULOS_ENVOLVENTES", "10", `${ux}`, "20", `${uy + 6}`, "11", `${ux + 40}`, "21", `${uy + 6}`,
+    // Un obstáculo polilínea cerrada geométricamente (sin flag 70=1) en OBSTACULOS_ENVOLVENTES
+    "0", "LWPOLYLINE", "8", "OBSTACULOS_ENVOLVENTES", "90", "5", "70", "0",
+    "10", `${ux + 5}`, "20", `${uy - 10}`,
+    "10", `${ux + 15}`, "20", `${uy - 10}`,
+    "10", `${ux + 15}`, "20", `${uy - 5}`,
+    "10", `${ux + 5}`, "20", `${uy - 5}`,
+    "10", `${ux + 5}`, "20", `${uy - 10}`,
+    // Dos capas contextuales: una incluida (PARCELARIO) y una excluida (TEXTOS_AUX)
+    "0", "LINE", "8", "PARCELARIO", "10", `${ux - 10}`, "20", `${uy - 15}`, "11", `${ux + 50}`, "21", `${uy - 15}`,
+    "0", "LINE", "8", "TEXTOS_AUX", "10", `${ux}`, "20", `${uy + 12}`, "11", `${ux + 10}`, "21", `${uy + 12}`,
+    "0", "ENDSEC", "0", "EOF"
+  ].join("\n");
+
+  const parsed = parseDXF(dxfUtm);
+  const suggested = detectSuggestedLayerMapping(parsed.layers);
+  const dxfDetectOk =
+    suggested.referenceAxisLayers.includes("EJES_VIALES") &&
+    !suggested.trajectoryLayer &&
+    suggested.obstacleLayers.includes("OBSTACULOS_ENVOLVENTES");
+
+  const dxfSc = buildScenarioFromDXF(parsed, {
+    ...suggested,
+    excludedBackgroundLayers: ["TEXTOS_AUX"]
+  });
+  const pnoaDxf = buildPnoaConfigFromUtmOrigin(dxfSc.originOffset, 30);
+  const dxfBuildOk =
+    dxfSc.referenceAxes.length === 2 &&
+    dxfSc.obstacles.length === 2 &&
+    dxfSc.obstacles[0].shape === "polyline" &&
+    dxfSc.obstacles[1].shape === "polygon" &&
+    dxfSc.backgroundEntities.length === 1 &&
+    dxfSc.backgroundEntities[0].layer === "PARCELARIO" &&
+    dxfSc.isUtmLikely === true &&
+    pnoaDxf &&
+    pnoaDxf.centerLat > 40.0 &&
+    pnoaDxf.centerLat < 41.0;
+
+  // 2. Carga múltiple de 2 GeoJSON independientes (ejes + obstáculos) con origen compartido
+  const geoEjes = {
+    type: "FeatureCollection",
+    features: [
+      {
+        type: "Feature",
+        properties: { nombre: "Eje Tronco" },
+        geometry: { type: "LineString", coordinates: [[-3.8800, 40.3870], [-3.8790, 40.3870]] }
+      }
+    ]
+  };
+  const geoObs = {
+    type: "FeatureCollection",
+    features: [
+      {
+        type: "Feature",
+        properties: { nombre: "Muro Norte" },
+        geometry: { type: "LineString", coordinates: [[-3.8800, 40.3871], [-3.8790, 40.3871]] }
+      },
+      {
+        type: "Feature",
+        properties: { nombre: "Edificio Sur" },
+        geometry: {
+          type: "Polygon",
+          coordinates: [[[-3.8800, 40.3868], [-3.8795, 40.3868], [-3.8795, 40.3869], [-3.8800, 40.3869], [-3.8800, 40.3868]]]
+        }
+      }
+    ]
+  };
+
+  const infoEjes = inspectGeoJSONFile(geoEjes, "ejes_viales.geojson");
+  const infoObs = inspectGeoJSONFile(geoObs, "obstaculos_envolventes.geojson");
+  const rolesSuggestedOk = infoEjes.suggestedRole === "reference_axes" && infoObs.suggestedRole === "obstacles";
+
+  const multiSc = buildScenarioFromGeoJSONFiles([
+    { fileName: infoEjes.fileName, features: infoEjes.features, role: infoEjes.suggestedRole },
+    { fileName: infoObs.fileName, features: infoObs.features, role: infoObs.suggestedRole }
+  ]);
+
+  // Verificar carga aditiva posterior reutilizando sharedOrigin: debe producir exactamente las mismas coordenadas locales
+  const scStep1 = buildScenarioFromGeoJSONFiles([
+    { fileName: infoEjes.fileName, features: infoEjes.features, role: "reference_axes" }
+  ]);
+  const scStep2 = buildScenarioFromGeoJSONFiles(
+    [{ fileName: infoObs.fileName, features: infoObs.features, role: "obstacles" }],
+    { sharedOrigin: scStep1.sharedOrigin }
+  );
+
+  // Distancia relativa en Y entre el eje y el muro norte en carga conjunta vs carga aditiva
+  const dyCombined = multiSc.obstacles[0].vertices[0][1] - multiSc.referenceAxes[0].vertices[0][1];
+  const dyAdditive = scStep2.obstacles[0].vertices[0][1] - scStep1.referenceAxes[0].vertices[0][1];
+  const driftM = Math.abs(dyCombined - dyAdditive);
+
+  const multiGeoOk =
+    multiSc.referenceAxes.length === 1 &&
+    multiSc.obstacles.length === 2 &&
+    multiSc.obstacles[0].shape === "polyline" &&
+    multiSc.obstacles[1].shape === "polygon" &&
+    driftM < 1e-3 &&
+    dyCombined > 5.0;
+
+  assertCondition(
+    "TEST-47",
+    `Importación CAD DXF multicapa (EJES_VIALES/OBSTACULOS_ENVOLVENTES + UTM PNOA) y GeoJSON múltiple con origen compartido`,
+    dxfDetectOk && dxfBuildOk && rolesSuggestedOk && multiGeoOk,
+    `dxfAxes=${dxfSc.referenceAxes.length}, dxfObs=${dxfSc.obstacles.length} (${dxfSc.obstacles.map((o) => o.shape).join("+")}), dxfBg=${dxfSc.backgroundEntities.length}, pnoaLat=${pnoaDxf?.centerLat}, geoDrift=${driftM.toFixed(5)} m`
+  );
+}
+
 console.log("\n==================================================================");
 console.log(` RESUMEN DE VERIFICACIÓN: ${passed} superadas, ${failed} fallidas`);
 console.log("==================================================================");

@@ -1933,10 +1933,10 @@ select option {
           <!-- ETAPA 1: ESCENARIO Y CAD -->
           <div class="stage-section-block" id="stage-block-1">
             <!-- Zona de Carga de archivo CAD DXF / GIS GeoJSON -->
-            <div id="dxf-drop-zone" class="dxf-drop-zone" title="Arrastre aquí un archivo .dxf o .geojson, o haga clic para seleccionarlo">
+            <div id="dxf-drop-zone" class="dxf-drop-zone" title="Arrastre aquí un archivo .dxf o uno o varios archivos .geojson, o haga clic para seleccionarlos">
               <div class="dxf-drop-title" data-i18n="dxf_drop_title">📂 Cargar plano CAD o GIS (.DXF, .GeoJSON)</div>
-              <div class="dxf-drop-hint" data-i18n="dxf_drop_hint">Arrastre su archivo DXF o GeoJSON con cartografía, o haga clic para examinar</div>
-              <input type="file" id="inp-dxf-file" accept=".dxf,.geojson,.json" style="display:none;" />
+              <div class="dxf-drop-hint" data-i18n="dxf_drop_hint">Arrastre un DXF multicapa o 1 o varios GeoJSON (ejes + obstáculos), o haga clic para examinar</div>
+              <input type="file" id="inp-dxf-file" accept=".dxf,.geojson,.json" multiple style="display:none;" />
             </div>
 
             <div class="form-group" style="margin-top:10px;">
@@ -2177,6 +2177,7 @@ select option {
                   <label class="layer-check"><input type="checkbox" id="chk-layer-refs" checked /> Trazas ejes ref.</label>
                   <label class="layer-check"><input type="checkbox" id="chk-layer-ghosts" checked /> Siluetas paso</label>
                   <label class="layer-check"><input type="checkbox" id="chk-layer-obstacles" checked /> Obstáculos viarios</label>
+                  <label class="layer-check"><input type="checkbox" id="chk-layer-ref-axes" checked /> Ejes viales de referencia</label>
                   <label class="layer-check"><input type="checkbox" id="chk-layer-cad-bg" checked /> Plano fondo CAD</label>
                   <label class="layer-check"><input type="checkbox" id="chk-layer-dims" checked /> Cotas y holguras</label>
                   <label class="layer-check"><input type="checkbox" id="chk-layer-axles" checked /> Ruedas y kingpin</label>
@@ -16700,6 +16701,8 @@ function generateSVGDiagram(
   const highlightBbox = options?.highlightBbox || null;
 
   const showCadBackground = layerVisibility.cadBackground !== false;
+  const showReferenceAxes = layerVisibility.referenceAxes !== false;
+  const referenceAxes = Array.isArray(options?.referenceAxes) ? options.referenceAxes : [];
   const showEnvelope = layerVisibility.envelope !== false;
   const showMargin = layerVisibility.margin !== false;
   const showWheelTraces = !overviewMode && layerVisibility.wheelTraces !== false;
@@ -16828,6 +16831,19 @@ function generateSVGDiagram(
           `    <polyline points="${polyToPointsAttr(ent.vertices)}" fill="none" stroke="#94a3b8" stroke-width="${cadStrokeW}" stroke-dasharray="0.25 0.15" />`
         );
       }
+    }
+    lines.push(`  </g>`);
+  }
+
+  // 0.5 Ejes viales de referencia
+  if (showReferenceAxes && referenceAxes && referenceAxes.length > 0) {
+    lines.push(`  <g id="reference-axes">`);
+    const axisStrokeW = ovStroke(0.06);
+    for (const ax of referenceAxes) {
+      if (!ax.vertices || ax.vertices.length < 2) continue;
+      lines.push(
+        `    <polyline points="${polyToPointsAttr(ax.vertices)}" fill="none" stroke="#0891b2" stroke-width="${axisStrokeW}" stroke-dasharray="0.60 0.20 0.12 0.20" />`
+      );
     }
     lines.push(`  </g>`);
   }
@@ -17232,6 +17248,7 @@ function openStructuredTechnicalReport({
   obstacles,
   layerVisibility,
   cadBackgroundEntities = [],
+  referenceAxes = [],
   diligence = {}
 }) {
   const nowStr = new Date().toLocaleString("es-ES", {
@@ -17247,7 +17264,7 @@ function openStructuredTechnicalReport({
     obstacles,
     layerVisibility,
     cadBackgroundEntities,
-    { focusOnTrajectory: true, paddingM: 2.0 }
+    { focusOnTrajectory: true, paddingM: 2.0, referenceAxes }
   );
   const overviewSvgDiagram = generateSVGDiagram(
     simResult,
@@ -17255,7 +17272,7 @@ function openStructuredTechnicalReport({
     obstacles,
     { ...layerVisibility, wheelTraces: false, ghosts: false, dimensions: false },
     cadBackgroundEntities,
-    { focusOnTrajectory: false, overviewMode: true, highlightBbox: detailBbox }
+    { focusOnTrajectory: false, overviewMode: true, highlightBbox: detailBbox, referenceAxes }
   );
 
   const segmentsRows = (maneuver.segments || [])
@@ -17971,24 +17988,37 @@ function normalizeLayerName(name) {
  * Capas sugeridas / convencionales en TurnSim
  */
 const SUGGESTED_LAYERS = {
+  REFERENCE_AXES: [
+    "EJES_VIALES",
+    "EJE_VIAL",
+    "EJES_CARRETERA",
+    "EJE_CARRETERA",
+    "EJES",
+    "ROAD_AXES",
+    "CENTERLINES",
+    "CENTERLINE",
+    "GUIAS"
+  ],
   TRAJECTORY: [
     "TURNSIM_TRAYECTORIA",
     "TURNSIM_EJE",
     "TRAYECTORIA",
     "EJE_CAMION",
     "EJE_TRAYECTORIA",
-    "EJE_VIAL",
-    "EJE",
     "TRAJECTORY",
     "SWEPT_AXIS",
     "CAMINO",
-    "RUTA"
+    "RUTA",
+    "EJE"
   ],
   OBSTACLES: [
+    "OBSTACULOS_ENVOLVENTES",
+    "OBSTACULOS_VIALES",
     "TURNSIM_OBSTACULOS",
     "TURNSIM_OBSTACULO",
     "OBSTACULOS",
     "OBSTACULO",
+    "ENVOLVENTES",
     "EDIFICIOS",
     "EDIFICIO",
     "MUELLES_CARGA",
@@ -18502,11 +18532,23 @@ function detectSuggestedLayerMapping(availableLayers) {
     normMap.set(normalizeLayerName(lyr), lyr);
   }
 
-  // 1. Capa de trayectoria
+  // 1. Capas de ejes viales de referencia (guía y snap magnético)
+  const referenceAxisLayers = [];
+  for (const candidate of SUGGESTED_LAYERS.REFERENCE_AXES) {
+    const candNorm = normalizeLayerName(candidate);
+    for (const [nKey, orig] of normMap.entries()) {
+      if ((nKey === candNorm || nKey.includes(candNorm)) && !referenceAxisLayers.includes(orig)) {
+        referenceAxisLayers.push(orig);
+      }
+    }
+  }
+
+  // 2. Capa de trayectoria directa (omite capas ya clasificadas como ejes de referencia)
   let trajectoryLayer = null;
   for (const candidate of SUGGESTED_LAYERS.TRAJECTORY) {
     const candNorm = normalizeLayerName(candidate);
     for (const [nKey, orig] of normMap.entries()) {
+      if (referenceAxisLayers.includes(orig)) continue;
       if (nKey === candNorm || nKey.includes(candNorm)) {
         trajectoryLayer = orig;
         break;
@@ -18515,7 +18557,7 @@ function detectSuggestedLayerMapping(availableLayers) {
     if (trajectoryLayer) break;
   }
 
-  // 2. Capas de obstáculos
+  // 3. Capas de obstáculos
   const obstacleLayers = [];
   for (const candidate of SUGGESTED_LAYERS.OBSTACLES) {
     const candNorm = normalizeLayerName(candidate);
@@ -18526,7 +18568,7 @@ function detectSuggestedLayerMapping(availableLayers) {
     }
   }
 
-  // 3. Capas de bordes/bordillos
+  // 4. Capas de bordes/bordillos
   const boundaryLayers = [];
   for (const candidate of SUGGESTED_LAYERS.BOUNDARIES) {
     const candNorm = normalizeLayerName(candidate);
@@ -18537,7 +18579,7 @@ function detectSuggestedLayerMapping(availableLayers) {
     }
   }
 
-  // 4. Capas de zonas restringidas
+  // 5. Capas de zonas restringidas
   const restrictedLayers = [];
   for (const candidate of SUGGESTED_LAYERS.RESTRICTED) {
     const candNorm = normalizeLayerName(candidate);
@@ -18550,6 +18592,7 @@ function detectSuggestedLayerMapping(availableLayers) {
 
   return {
     trajectoryLayer,
+    referenceAxisLayers,
     obstacleLayers,
     boundaryLayers,
     restrictedLayers
@@ -18701,12 +18744,20 @@ function convertPolylineToManeuver(vertices, options = {}) {
  * - bounds: Bounding box métrico global [minX, minY, maxX, maxY]
  */
 function buildScenarioFromDXF(parsedDxf, mapping, options = {}) {
-  const { trajectoryLayer, obstacleLayers = [], boundaryLayers = [], restrictedLayers = [] } = mapping;
+  const {
+    trajectoryLayer = null,
+    referenceAxisLayers = [],
+    obstacleLayers = [],
+    boundaryLayers = [],
+    restrictedLayers = [],
+    excludedBackgroundLayers = []
+  } = mapping || {};
   const entities = parsedDxf.entities || [];
   const scale = Number(options.scale || 1.0);
   const applyScale = scale !== 1.0 && Number.isFinite(scale) && scale > 0;
 
   let trajectoryEntity = null;
+  const referenceAxes = [];
   const obstacles = [];
   const backgroundEntities = [];
 
@@ -18720,7 +18771,24 @@ function buildScenarioFromDXF(parsedDxf, mapping, options = {}) {
     }
   }
 
+  /**
+   * Detecta cierre geométrico en polilíneas CAD cuando el primer y último vértice
+   * coinciden (< 1 cm) aunque el flag DXF 70=1 no estuviese marcado.
+   */
+  function resolveClosure(rawClosed, verts) {
+    if (rawClosed) return { closed: true, vertices: verts };
+    if (verts.length >= 4) {
+      const first = verts[0];
+      const last = verts[verts.length - 1];
+      if (Math.hypot(first[0] - last[0], first[1] - last[1]) < 0.01) {
+        return { closed: true, vertices: verts.slice(0, -1) };
+      }
+    }
+    return { closed: false, vertices: verts };
+  }
+
   let obsCounter = 1;
+  let axisCounter = 1;
 
   for (const rawEnt of entities) {
     if (!rawEnt.vertices || rawEnt.vertices.length < 2) continue;
@@ -18729,26 +18797,39 @@ function buildScenarioFromDXF(parsedDxf, mapping, options = {}) {
       : rawEnt.vertices;
     const ent = { ...rawEnt, vertices };
 
-    updateBounds(ent.vertices);
-
     if (trajectoryLayer && ent.layer === trajectoryLayer && !trajectoryEntity) {
+      updateBounds(ent.vertices);
       trajectoryEntity = ent;
       continue;
     }
 
-    if (obstacleLayers.includes(ent.layer)) {
+    if (referenceAxisLayers.includes(ent.layer)) {
+      updateBounds(ent.vertices);
+      referenceAxes.push({
+        id: `dxf_axis_${axisCounter}`,
+        name: `Eje vial (${ent.layer} #${axisCounter})`,
+        layer: ent.layer,
+        vertices: ent.vertices,
+        closed: Boolean(ent.closed)
+      });
+      axisCounter++;
+    } else if (obstacleLayers.includes(ent.layer)) {
+      const resolved = resolveClosure(Boolean(ent.closed), ent.vertices);
+      updateBounds(resolved.vertices);
       obstacles.push({
-        id: `dxf_obs_${obsCounter++}`,
+        id: `dxf_obs_${obsCounter}`,
         name: `Obstáculo CAD (${ent.layer} #${obsCounter})`,
         type: "building",
-        shape: ent.closed ? "polygon" : "polyline",
-        vertices: ent.vertices,
+        shape: resolved.closed ? "polygon" : "polyline",
+        vertices: resolved.vertices,
         color: "#ef4444",
         enabled: true
       });
+      obsCounter++;
     } else if (boundaryLayers.includes(ent.layer)) {
+      updateBounds(ent.vertices);
       obstacles.push({
-        id: `dxf_curb_${obsCounter++}`,
+        id: `dxf_curb_${obsCounter}`,
         name: `Borde/Bordillo (${ent.layer} #${obsCounter})`,
         type: "road_edge",
         shape: "polyline",
@@ -18756,18 +18837,23 @@ function buildScenarioFromDXF(parsedDxf, mapping, options = {}) {
         color: "#f59e0b",
         enabled: true
       });
+      obsCounter++;
     } else if (restrictedLayers.includes(ent.layer)) {
+      const resolved = resolveClosure(Boolean(ent.closed), ent.vertices);
+      updateBounds(resolved.vertices);
       obstacles.push({
-        id: `dxf_restr_${obsCounter++}`,
+        id: `dxf_restr_${obsCounter}`,
         name: `Zona Restringida (${ent.layer} #${obsCounter})`,
         type: "restricted_zone",
-        shape: ent.closed ? "polygon" : "polyline",
-        vertices: ent.vertices,
+        shape: resolved.closed ? "polygon" : "polyline",
+        vertices: resolved.vertices,
         color: "#eab308",
         enabled: true
       });
-    } else {
+      obsCounter++;
+    } else if (!excludedBackgroundLayers.includes(ent.layer)) {
       // Elemento de contexto visual
+      updateBounds(ent.vertices);
       backgroundEntities.push({
         layer: ent.layer,
         vertices: ent.vertices,
@@ -18794,6 +18880,11 @@ function buildScenarioFromDXF(parsedDxf, mapping, options = {}) {
     if (trajectoryEntity && trajectoryEntity.vertices) {
       trajectoryEntity.vertices = trajectoryEntity.vertices.map(([vx, vy]) => [vx - ox, vy - oy]);
     }
+    for (const ax of referenceAxes) {
+      if (ax.vertices) {
+        ax.vertices = ax.vertices.map(([vx, vy]) => [vx - ox, vy - oy]);
+      }
+    }
     for (const obs of obstacles) {
       if (obs.vertices) {
         obs.vertices = obs.vertices.map(([vx, vy]) => [vx - ox, vy - oy]);
@@ -18819,14 +18910,23 @@ function buildScenarioFromDXF(parsedDxf, mapping, options = {}) {
   }
 
   const bounds = Number.isFinite(minX) ? { minX, minY, maxX, maxY } : null;
+  const isUtmLikely = Boolean(
+    originOffset &&
+    originOffset.x > 100000 &&
+    originOffset.x < 900000 &&
+    originOffset.y > 3000000 &&
+    originOffset.y < 5500000
+  );
 
   return {
     maneuver,
+    referenceAxes,
     obstacles,
     backgroundEntities,
     bounds,
     trajectoryEntity,
-    originOffset
+    originOffset,
+    isUtmLikely
   };
 }
 
@@ -19049,36 +19149,148 @@ function isGeographicCoordinates(x, y) {
 }
 
 /**
- * Convierte un FeatureCollection o Feature GeoJSON en un escenario completo de TurnSim,
- * proyectando las geometrías al sistema métrico local y georreferenciando automáticamente
- * la capa de ortofotos PNOA del IGN.
- *
- * @param {string|object} geojsonInput
- * @param {object} options Opciones de configuración
- * @returns {object} Escenario con maneuver, obstacles, backgroundEntities, bounds, geoCenter y pnoaConfig
+ * Construye una configuración de ortofoto PNOA (IGN) alineada exactamente con el
+ * origen local UTM (`originOffset`) de un plano DXF en coordenadas ETRS89 UTM (España).
  */
-function buildScenarioFromGeoJSON(geojsonInput, options = {}) {
-  const features = parseGeoJSON(geojsonInput);
-  if (features.length === 0) {
-    throw new Error("El archivo GeoJSON no contiene ninguna entidad geométrica procesable.");
+function buildPnoaConfigFromUtmOrigin(originOffset, utmZone = 30) {
+  if (!originOffset || !Number.isFinite(originOffset.x) || !Number.isFinite(originOffset.y)) {
+    return null;
   }
+  const geo = utmToWgs84(originOffset.x, originOffset.y, utmZone, true);
+  return {
+    enabled: true,
+    centerLat: geo.lat,
+    centerLon: geo.lon,
+    utmZone,
+    anchorWorldX: 0.0,
+    anchorWorldY: 0.0,
+    opacity: 0.8
+  };
+}
 
-  // 1. Detección del sistema de coordenadas y cálculo del bounding box global
-  let minLon = Infinity;
-  let maxLon = -Infinity;
-  let minLat = Infinity;
-  let maxLat = -Infinity;
+/**
+ * Inspecciona un archivo GeoJSON para mostrar resumen de geometrías, sistema de coordenadas
+ * y rol sugerido (ejes de referencia, obstáculos, bordes, fondo o detección automática).
+ */
+function inspectGeoJSONFile(geojsonInput, fileName = "archivo.geojson") {
+  const features = parseGeoJSON(geojsonInput);
+  const geomCounts = {};
   let isUtm = false;
+  let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
 
   function registerCoord(c) {
     if (!Array.isArray(c) || c.length < 2) return;
     const x = Number(c[0]);
     const y = Number(c[1]);
     if (!Number.isFinite(x) || !Number.isFinite(y)) return;
+    if (!isGeographicCoordinates(x, y)) isUtm = true;
+    if (x < minX) minX = x;
+    if (x > maxX) maxX = x;
+    if (y < minY) minY = y;
+    if (y > maxY) maxY = y;
+  }
 
-    if (!isGeographicCoordinates(x, y)) {
-      isUtm = true;
+  function scanGeom(geom) {
+    if (!geom || !geom.coordinates) return;
+    const t = geom.type;
+    geomCounts[t] = (geomCounts[t] || 0) + 1;
+    const c = geom.coordinates;
+    if (t === "Point") registerCoord(c);
+    else if (t === "LineString" || t === "MultiPoint") {
+      for (const pt of c) registerCoord(pt);
+    } else if (t === "Polygon" || t === "MultiLineString") {
+      for (const ring of c) {
+        if (Array.isArray(ring)) for (const pt of ring) registerCoord(pt);
+      }
+    } else if (t === "MultiPolygon") {
+      for (const poly of c) {
+        if (Array.isArray(poly)) {
+          for (const ring of poly) {
+            if (Array.isArray(ring)) for (const pt of ring) registerCoord(pt);
+          }
+        }
+      }
     }
+  }
+
+  for (const f of features) {
+    scanGeom(f.geometry);
+  }
+
+  // Sugerir rol por nombre de archivo y tipos geométricos predominantes
+  const normFile = normalizeName(fileName.replace(/\.[^.]+$/, ""));
+  const hasLines = (geomCounts.LineString || 0) + (geomCounts.MultiLineString || 0) > 0;
+  const hasPolys = (geomCounts.Polygon || 0) + (geomCounts.MultiPolygon || 0) > 0;
+  const hasPoints = (geomCounts.Point || 0) + (geomCounts.MultiPoint || 0) > 0;
+
+  let suggestedRole = "auto";
+  if (/OBSTAC|ENVOLV|EDIFIC|MURO|VALLA|BARRER|BUILD|OBST/.test(normFile)) {
+    suggestedRole = "obstacles";
+  } else if (/EJE|VIAL|AXIS|CENTERLINE|EJE_VIAL|CARRETERA|ROAD_AX/.test(normFile) && hasLines && !hasPolys) {
+    suggestedRole = "reference_axes";
+  } else if (/BORDILL|BORDE|ACERA|CURB|EDGE/.test(normFile)) {
+    suggestedRole = "boundaries";
+  } else if (/RESTRING|PROHIB|EXCLUID|PEATON/.test(normFile)) {
+    suggestedRole = "restricted";
+  } else if (/FONDO|CONTEXT|PARCELA|BASE|BACKGR/.test(normFile)) {
+    suggestedRole = "background";
+  } else {
+    // Si tiene propiedades explícitas conocidas, usar 'auto'; si no, inferir por geometría
+    const hasLayerHints = features.some((f) => {
+      const p = f.properties || {};
+      return Boolean(p.layer || p.capa || p.tipo || p.type || p.role || p.isTrajectory);
+    });
+    if (!hasLayerHints) {
+      if (hasLines && !hasPolys && !hasPoints) suggestedRole = "reference_axes";
+      else if (hasPolys) suggestedRole = "obstacles";
+    }
+  }
+
+  return {
+    fileName,
+    features,
+    featureCount: features.length,
+    geomCounts,
+    isUtm,
+    rawBounds: Number.isFinite(minX) ? { minX, minY, maxX, maxY } : null,
+    suggestedRole
+  };
+}
+
+/**
+ * Construye un escenario unificado a partir de uno o varios archivos GeoJSON,
+ * proyectando todas las entidades bajo un único origen común (o reutilizando
+ * `options.sharedOrigin` al añadir capas a una escena georreferenciada activa).
+ *
+ * @param {Array<{ fileName?: string, features?: Array, geojson?: string|object, role?: string }>} fileEntries
+ * @param {object} options { utmZone, sharedOrigin, direction, agreementRadius }
+ */
+function buildScenarioFromGeoJSONFiles(fileEntries, options = {}) {
+  if (!Array.isArray(fileEntries) || fileEntries.length === 0) {
+    throw new Error("Debe proporcionar al menos un archivo GeoJSON válido.");
+  }
+
+  const normalizedEntries = fileEntries.map((entry, idx) => {
+    const feats = Array.isArray(entry.features)
+      ? entry.features
+      : parseGeoJSON(entry.geojson);
+    return {
+      fileName: entry.fileName || `capa_${idx + 1}.geojson`,
+      features: feats,
+      role: entry.role || "auto"
+    };
+  });
+
+  // 1. Detección global de CRS y bounding box conjunto (si no hay sharedOrigin previo)
+  let minLon = Infinity, maxLon = -Infinity, minLat = Infinity, maxLat = -Infinity;
+  let detectedUtm = false;
+
+  function registerCoord(c) {
+    if (!Array.isArray(c) || c.length < 2) return;
+    const x = Number(c[0]);
+    const y = Number(c[1]);
+    if (!Number.isFinite(x) || !Number.isFinite(y)) return;
+    if (!isGeographicCoordinates(x, y)) detectedUtm = true;
     if (x < minLon) minLon = x;
     if (x > maxLon) maxLon = x;
     if (y < minLat) minLat = y;
@@ -19089,73 +19301,98 @@ function buildScenarioFromGeoJSON(geojsonInput, options = {}) {
     if (!geom || !geom.coordinates) return;
     const c = geom.coordinates;
     const type = geom.type;
-
     if (type === "Point") {
       registerCoord(c);
     } else if (type === "LineString" || type === "MultiPoint") {
       for (const pt of c) registerCoord(pt);
     } else if (type === "Polygon" || type === "MultiLineString") {
       for (const ring of c) {
-        if (Array.isArray(ring)) {
-          for (const pt of ring) registerCoord(pt);
-        }
+        if (Array.isArray(ring)) for (const pt of ring) registerCoord(pt);
       }
     } else if (type === "MultiPolygon") {
       for (const poly of c) {
         if (Array.isArray(poly)) {
           for (const ring of poly) {
-            if (Array.isArray(ring)) {
-              for (const pt of ring) registerCoord(pt);
-            }
+            if (Array.isArray(ring)) for (const pt of ring) registerCoord(pt);
           }
         }
       }
     }
   }
 
-  for (const feat of features) {
-    scanCoords(feat.geometry);
-  }
-
-  if (!Number.isFinite(minLon) || !Number.isFinite(maxLon)) {
-    throw new Error("No se encontraron coordenadas válidas en las geometrías del GeoJSON.");
-  }
-
-  let centerLon = 0.5 * (minLon + maxLon);
-  let centerLat = 0.5 * (minLat + maxLat);
-  let utmZone = options.utmZone || 30;
-
-  // Si las coordenadas venían en UTM, calcular latitud y longitud WGS84 para el PNOA
-  if (isUtm) {
-    const geoCenter = utmToWgs84(centerLon, centerLat, utmZone, true);
-    centerLon = geoCenter.lon;
-    centerLat = geoCenter.lat;
-  }
-
-  // 2. Función de proyección métrica local normalizada
-  const toLocalMeters = (coord) => {
-    let rawX = Number(coord[0]);
-    let rawY = Number(coord[1]);
-    if (isUtm) {
-      // Coordenadas métricas UTM directas centradas en el centroide
-      const cx = 0.5 * (minLon + maxLon);
-      const cy = 0.5 * (minLat + maxLat);
-      return [Number((rawX - cx).toFixed(4)), Number((rawY - cy).toFixed(4))];
+  let totalFeatures = 0;
+  for (const entry of normalizedEntries) {
+    for (const feat of entry.features) {
+      totalFeatures++;
+      scanCoords(feat.geometry);
     }
+  }
+
+  if (totalFeatures === 0 || !Number.isFinite(minLon) || !Number.isFinite(maxLon)) {
+    throw new Error("No se encontraron coordenadas válidas en las geometrías GeoJSON.");
+  }
+
+  const utmZone = Number(options.utmZone || options.sharedOrigin?.utmZone || 30);
+  let sharedOrigin = options.sharedOrigin ? { ...options.sharedOrigin } : null;
+
+  if (!sharedOrigin) {
+    if (detectedUtm) {
+      const utmCenterX = 0.5 * (minLon + maxLon);
+      const utmCenterY = 0.5 * (minLat + maxLat);
+      const geoCenter = utmToWgs84(utmCenterX, utmCenterY, utmZone, true);
+      sharedOrigin = {
+        isUtm: true,
+        utmZone,
+        utmCenterX,
+        utmCenterY,
+        centerLon: geoCenter.lon,
+        centerLat: geoCenter.lat
+      };
+    } else {
+      sharedOrigin = {
+        isUtm: false,
+        utmZone,
+        utmCenterX: null,
+        utmCenterY: null,
+        centerLon: Number((0.5 * (minLon + maxLon)).toFixed(7)),
+        centerLat: Number((0.5 * (minLat + maxLat)).toFixed(7))
+      };
+    }
+  }
+
+  const centerLon = sharedOrigin.centerLon;
+  const centerLat = sharedOrigin.centerLat;
+
+  // 2. Proyección métrica local unificada (admite mezcla WGS84 y UTM contra el mismo origen)
+  const toLocalMeters = (coord) => {
+    const rawX = Number(coord[0]);
+    const rawY = Number(coord[1]);
+    const coordIsUtm = !isGeographicCoordinates(rawX, rawY);
+
+    if (coordIsUtm) {
+      if (sharedOrigin.isUtm && Number.isFinite(sharedOrigin.utmCenterX) && Number.isFinite(sharedOrigin.utmCenterY)) {
+        return [
+          Number((rawX - sharedOrigin.utmCenterX).toFixed(4)),
+          Number((rawY - sharedOrigin.utmCenterY).toFixed(4))
+        ];
+      }
+      // Si el origen es WGS84 pero esta entidad viene en UTM, convertir primero a WGS84
+      const wgs = utmToWgs84(rawX, rawY, utmZone, true);
+      return projectWgs84ToLocalMeters(wgs.lon, wgs.lat, centerLon, centerLat);
+    }
+
     return projectWgs84ToLocalMeters(rawX, rawY, centerLon, centerLat);
   };
 
   // 3. Extracción de geometrías clasificadas
   const obstacles = [];
+  const referenceAxes = [];
   const backgroundEntities = [];
   let trajectoryEntity = null;
   let obsCounter = 1;
+  let axisCounter = 1;
 
-  let localMinX = Infinity;
-  let localMaxX = -Infinity;
-  let localMinY = Infinity;
-  let localMaxY = -Infinity;
-
+  let localMinX = Infinity, localMaxX = -Infinity, localMinY = Infinity, localMaxY = -Infinity;
   function updateLocalBounds(pts) {
     for (const [x, y] of pts) {
       if (x < localMinX) localMinX = x;
@@ -19165,205 +19402,316 @@ function buildScenarioFromGeoJSON(geojsonInput, options = {}) {
     }
   }
 
-  // Evaluar coincidencia de capa o propiedades con patrones
   function matchesPattern(text, patterns) {
     const norm = normalizeName(text);
+    if (!norm) return false;
     return patterns.some((p) => norm.includes(p) || p.includes(norm));
   }
 
-  for (const feat of features) {
-    const props = feat.properties || {};
-    const geom = feat.geometry;
-    if (!geom) continue;
+  for (const entry of normalizedEntries) {
+    const forcedRole = entry.role || "auto";
+    const baseLayerName = entry.fileName.replace(/\.[^.]+$/, "");
 
-    const layerTag = props.layer || props.capa || props.tipo || props.type || props.name || props.highway || "";
-    const nameTag = props.name || props.nombre || props.id || `Elemento #${obsCounter}`;
+    for (const feat of entry.features) {
+      const props = feat.properties || {};
+      const geom = feat.geometry;
+      if (!geom) continue;
 
-    const isExplicitTrajectory =
-      matchesPattern(layerTag, GEOJSON_LAYER_PATTERNS.TRAJECTORY) ||
-      matchesPattern(props.role || "", GEOJSON_LAYER_PATTERNS.TRAJECTORY) ||
-      props.isTrajectory === true;
+      const layerTag = props.layer || props.capa || props.tipo || props.type || props.name || props.highway || baseLayerName;
+      const nameTag = props.name || props.nombre || props.id || `Elemento #${obsCounter}`;
+      const geomType = geom.type;
 
-    const isCurbOrEdge =
-      matchesPattern(layerTag, GEOJSON_LAYER_PATTERNS.CURBS_AND_EDGES);
+      // Modo de rol forzado por archivo (ideal para flujos con 2 archivos: ejes + obstáculos)
+      if (forcedRole !== "auto") {
+        if (forcedRole === "reference_axes") {
+          const lines = geomType === "LineString"
+            ? [geom.coordinates]
+            : (geomType === "MultiLineString" ? geom.coordinates : []);
+          for (const line of lines) {
+            const vertices = line.map(toLocalMeters);
+            if (vertices.length < 2) continue;
+            updateLocalBounds(vertices);
+            referenceAxes.push({
+              id: `geo_axis_${axisCounter}`,
+              name: props.name || props.nombre || `Eje vial (${baseLayerName} #${axisCounter})`,
+              layer: baseLayerName,
+              vertices,
+              closed: false
+            });
+            axisCounter++;
+          }
+          continue;
+        }
 
-    const isIsland =
-      matchesPattern(layerTag, GEOJSON_LAYER_PATTERNS.ISLANDS);
+        if (forcedRole === "obstacles" || forcedRole === "boundaries" || forcedRole === "restricted") {
+          const obsType = forcedRole === "boundaries"
+            ? "road_edge"
+            : (forcedRole === "restricted" ? "restricted_zone" : "building");
+          const obsColor = forcedRole === "boundaries"
+            ? "#f59e0b"
+            : (forcedRole === "restricted" ? "#eab308" : "#ef4444");
 
-    const isBuildingOrBarrier =
-      matchesPattern(layerTag, GEOJSON_LAYER_PATTERNS.BUILDINGS_AND_BARRIERS);
+          if (geomType === "LineString" || geomType === "MultiLineString") {
+            const lines = geomType === "LineString" ? [geom.coordinates] : geom.coordinates;
+            for (const line of lines) {
+              const vertices = line.map(toLocalMeters);
+              if (vertices.length < 2) continue;
+              updateLocalBounds(vertices);
+              obstacles.push({
+                id: `geo_obs_${obsCounter}`,
+                name: props.name || props.nombre || `Obstáculo GIS (${baseLayerName} #${obsCounter})`,
+                type: obsType,
+                shape: "polyline",
+                vertices,
+                color: props.color || obsColor,
+                enabled: true
+              });
+              obsCounter++;
+            }
+          } else if (geomType === "Polygon" || geomType === "MultiPolygon") {
+            const polys = geomType === "Polygon" ? [geom.coordinates] : geom.coordinates;
+            for (const poly of polys) {
+              const exterior = poly[0]?.map(toLocalMeters) || [];
+              if (exterior.length < 3) continue;
+              updateLocalBounds(exterior);
+              obstacles.push({
+                id: `geo_obs_${obsCounter}`,
+                name: props.name || props.nombre || `Obstáculo GIS (${baseLayerName} #${obsCounter})`,
+                type: obsType,
+                shape: "polygon",
+                vertices: exterior,
+                color: props.color || obsColor,
+                heightM: props.heightM || (forcedRole === "obstacles" ? 3.5 : 0.25),
+                enabled: true
+              });
+              obsCounter++;
+            }
+          } else if (geomType === "Point") {
+            const [px, py] = toLocalMeters(geom.coordinates);
+            updateLocalBounds([[px, py]]);
+            obstacles.push({
+              id: `geo_pt_${obsCounter}`,
+              name: props.name || props.nombre || `Pilar / Punto (${baseLayerName} #${obsCounter})`,
+              type: "column",
+              shape: "circle",
+              x: px,
+              y: py,
+              radius: Number(props.radius || 0.35),
+              heightM: Number(props.heightM || 3.0),
+              color: props.color || "#f97316",
+              enabled: true
+            });
+            obsCounter++;
+          }
+          continue;
+        }
 
-    const isRestricted =
-      matchesPattern(layerTag, GEOJSON_LAYER_PATTERNS.RESTRICTED_ZONING);
-
-    const geomType = geom.type;
-
-    // Procesar LineString
-    if (geomType === "LineString") {
-      const vertices = geom.coordinates.map(toLocalMeters);
-      updateLocalBounds(vertices);
-
-      if (isExplicitTrajectory && !trajectoryEntity && vertices.length >= 2) {
-        trajectoryEntity = {
-          layer: layerTag || "EJE_TRAYECTORIA",
-          vertices,
-          properties: props
-        };
-      } else if (isCurbOrEdge) {
-        obstacles.push({
-          id: `geo_curb_${obsCounter++}`,
-          name: nameTag.startsWith("Elemento") ? `Borde de calzada / Bordillo (${nameTag})` : nameTag,
-          type: "road_edge",
-          shape: "polyline",
-          vertices,
-          color: props.color || "#f59e0b",
-          enabled: true
-        });
-      } else if (isIsland) {
-        obstacles.push({
-          id: `geo_island_${obsCounter++}`,
-          name: nameTag,
-          type: "roundabout_island",
-          shape: "polyline",
-          vertices,
-          color: props.color || "#10b981",
-          enabled: true
-        });
-      } else {
-        backgroundEntities.push({
-          layer: layerTag || "VIAL_LINEA",
-          vertices,
-          closed: false,
-          color: props.color || "#38bdf8"
-        });
+        if (forcedRole === "background") {
+          if (geomType === "LineString" || geomType === "MultiLineString") {
+            const lines = geomType === "LineString" ? [geom.coordinates] : geom.coordinates;
+            for (const line of lines) {
+              const vertices = line.map(toLocalMeters);
+              if (vertices.length < 2) continue;
+              updateLocalBounds(vertices);
+              backgroundEntities.push({ layer: baseLayerName, vertices, closed: false, color: props.color || "#64748b" });
+            }
+          } else if (geomType === "Polygon" || geomType === "MultiPolygon") {
+            const polys = geomType === "Polygon" ? [geom.coordinates] : geom.coordinates;
+            for (const poly of polys) {
+              const exterior = poly[0]?.map(toLocalMeters) || [];
+              if (exterior.length < 3) continue;
+              updateLocalBounds(exterior);
+              backgroundEntities.push({ layer: baseLayerName, vertices: exterior, closed: true, color: props.color || "#64748b" });
+            }
+          }
+          continue;
+        }
       }
-    }
 
-    // Procesar MultiLineString
-    else if (geomType === "MultiLineString") {
-      for (const line of geom.coordinates) {
-        const vertices = line.map(toLocalMeters);
+      // Modo automático por propiedades internas (retrocompatible con buildScenarioFromGeoJSON)
+      const isExplicitTrajectory =
+        matchesPattern(layerTag, GEOJSON_LAYER_PATTERNS.TRAJECTORY) ||
+        matchesPattern(props.role || "", GEOJSON_LAYER_PATTERNS.TRAJECTORY) ||
+        props.isTrajectory === true;
+
+      const isCurbOrEdge = matchesPattern(layerTag, GEOJSON_LAYER_PATTERNS.CURBS_AND_EDGES);
+      const isIsland = matchesPattern(layerTag, GEOJSON_LAYER_PATTERNS.ISLANDS);
+      const isBuildingOrBarrier = matchesPattern(layerTag, GEOJSON_LAYER_PATTERNS.BUILDINGS_AND_BARRIERS);
+      const isRestricted = matchesPattern(layerTag, GEOJSON_LAYER_PATTERNS.RESTRICTED_ZONING);
+
+      if (geomType === "LineString") {
+        const vertices = geom.coordinates.map(toLocalMeters);
         updateLocalBounds(vertices);
 
-        if (isCurbOrEdge) {
+        if (isExplicitTrajectory && !trajectoryEntity && vertices.length >= 2) {
+          trajectoryEntity = {
+            layer: layerTag || "EJE_TRAYECTORIA",
+            vertices,
+            properties: props
+          };
+        } else if (isCurbOrEdge) {
           obstacles.push({
             id: `geo_curb_${obsCounter++}`,
-            name: `${nameTag} (Tramo)`,
+            name: nameTag.startsWith("Elemento") ? `Borde de calzada / Bordillo (${nameTag})` : nameTag,
             type: "road_edge",
             shape: "polyline",
             vertices,
             color: props.color || "#f59e0b",
             enabled: true
           });
+        } else if (isIsland) {
+          obstacles.push({
+            id: `geo_island_${obsCounter++}`,
+            name: nameTag,
+            type: "roundabout_island",
+            shape: "polyline",
+            vertices,
+            color: props.color || "#10b981",
+            enabled: true
+          });
+        } else if (isBuildingOrBarrier) {
+          obstacles.push({
+            id: `geo_bar_${obsCounter++}`,
+            name: nameTag,
+            type: "building",
+            shape: "polyline",
+            vertices,
+            color: props.color || "#ef4444",
+            enabled: true
+          });
         } else {
           backgroundEntities.push({
-            layer: layerTag || "VIAL_MULTILINEA",
+            layer: layerTag || "VIAL_LINEA",
             vertices,
             closed: false,
             color: props.color || "#38bdf8"
           });
         }
-      }
-    }
+      } else if (geomType === "MultiLineString") {
+        for (const line of geom.coordinates) {
+          const vertices = line.map(toLocalMeters);
+          updateLocalBounds(vertices);
 
-    // Procesar Polygon
-    else if (geomType === "Polygon") {
-      const exterior = geom.coordinates[0]?.map(toLocalMeters) || [];
-      if (exterior.length >= 3) {
-        updateLocalBounds(exterior);
-
-        if (isIsland) {
-          obstacles.push({
-            id: `geo_island_${obsCounter++}`,
-            name: nameTag.startsWith("Elemento") ? `Isleta / Rotonda (${nameTag})` : nameTag,
-            type: "roundabout_central",
-            shape: "polygon",
-            vertices: exterior,
-            color: props.color || "#10b981",
-            heightM: props.heightM || 0.25,
-            enabled: true
-          });
-        } else if (isBuildingOrBarrier) {
-          obstacles.push({
-            id: `geo_bld_${obsCounter++}`,
-            name: nameTag.startsWith("Elemento") ? `Edificación / Obstáculo (${nameTag})` : nameTag,
-            type: "building",
-            shape: "polygon",
-            vertices: exterior,
-            color: props.color || "#ef4444",
-            heightM: props.heightM || 4.0,
-            enabled: true
-          });
-        } else if (isRestricted) {
-          obstacles.push({
-            id: `geo_restr_${obsCounter++}`,
-            name: nameTag,
-            type: "restricted_zone",
-            shape: "polygon",
-            vertices: exterior,
-            color: props.color || "#eab308",
-            enabled: true
-          });
-        } else if (isCurbOrEdge) {
-          obstacles.push({
-            id: `geo_curb_${obsCounter++}`,
-            name: nameTag,
-            type: "road_edge",
-            shape: "polygon",
-            vertices: exterior,
-            color: props.color || "#f59e0b",
-            enabled: true
-          });
-        } else {
-          backgroundEntities.push({
-            layer: layerTag || "SUPERFICIE_CALZADA",
-            vertices: exterior,
-            closed: true,
-            color: props.color || "#64748b"
-          });
+          if (isCurbOrEdge) {
+            obstacles.push({
+              id: `geo_curb_${obsCounter++}`,
+              name: `${nameTag} (Tramo)`,
+              type: "road_edge",
+              shape: "polyline",
+              vertices,
+              color: props.color || "#f59e0b",
+              enabled: true
+            });
+          } else if (isBuildingOrBarrier) {
+            obstacles.push({
+              id: `geo_bar_${obsCounter++}`,
+              name: `${nameTag} (Tramo)`,
+              type: "building",
+              shape: "polyline",
+              vertices,
+              color: props.color || "#ef4444",
+              enabled: true
+            });
+          } else {
+            backgroundEntities.push({
+              layer: layerTag || "VIAL_MULTILINEA",
+              vertices,
+              closed: false,
+              color: props.color || "#38bdf8"
+            });
+          }
         }
-      }
-    }
-
-    // Procesar MultiPolygon
-    else if (geomType === "MultiPolygon") {
-      for (const poly of geom.coordinates) {
-        const exterior = poly[0]?.map(toLocalMeters) || [];
+      } else if (geomType === "Polygon") {
+        const exterior = geom.coordinates[0]?.map(toLocalMeters) || [];
         if (exterior.length >= 3) {
           updateLocalBounds(exterior);
-          obstacles.push({
-            id: `geo_poly_${obsCounter++}`,
-            name: `${nameTag} (Parte)`,
-            type: isIsland ? "roundabout_island" : "building",
-            shape: "polygon",
-            vertices: exterior,
-            color: isIsland ? "#10b981" : "#ef4444",
-            enabled: true
-          });
-        }
-      }
-    }
 
-    // Procesar Point
-    else if (geomType === "Point") {
-      const [px, py] = toLocalMeters(geom.coordinates);
-      updateLocalBounds([[px, py]]);
-      obstacles.push({
-        id: `geo_point_${obsCounter++}`,
-        name: nameTag.startsWith("Elemento") ? `Pilar / Farola (${nameTag})` : nameTag,
-        type: "column",
-        shape: "circle",
-        x: px,
-        y: py,
-        radius: Number(props.radius || 0.35),
-        heightM: Number(props.heightM || 3.0),
-        color: props.color || "#f97316",
-        enabled: true
-      });
+          if (isIsland) {
+            obstacles.push({
+              id: `geo_island_${obsCounter++}`,
+              name: nameTag.startsWith("Elemento") ? `Isleta / Rotonda (${nameTag})` : nameTag,
+              type: "roundabout_central",
+              shape: "polygon",
+              vertices: exterior,
+              color: props.color || "#10b981",
+              heightM: props.heightM || 0.25,
+              enabled: true
+            });
+          } else if (isBuildingOrBarrier) {
+            obstacles.push({
+              id: `geo_bld_${obsCounter++}`,
+              name: nameTag.startsWith("Elemento") ? `Edificación / Obstáculo (${nameTag})` : nameTag,
+              type: "building",
+              shape: "polygon",
+              vertices: exterior,
+              color: props.color || "#ef4444",
+              heightM: props.heightM || 4.0,
+              enabled: true
+            });
+          } else if (isRestricted) {
+            obstacles.push({
+              id: `geo_restr_${obsCounter++}`,
+              name: nameTag,
+              type: "restricted_zone",
+              shape: "polygon",
+              vertices: exterior,
+              color: props.color || "#eab308",
+              enabled: true
+            });
+          } else if (isCurbOrEdge) {
+            obstacles.push({
+              id: `geo_curb_${obsCounter++}`,
+              name: nameTag,
+              type: "road_edge",
+              shape: "polygon",
+              vertices: exterior,
+              color: props.color || "#f59e0b",
+              enabled: true
+            });
+          } else {
+            backgroundEntities.push({
+              layer: layerTag || "SUPERFICIE_CALZADA",
+              vertices: exterior,
+              closed: true,
+              color: props.color || "#64748b"
+            });
+          }
+        }
+      } else if (geomType === "MultiPolygon") {
+        for (const poly of geom.coordinates) {
+          const exterior = poly[0]?.map(toLocalMeters) || [];
+          if (exterior.length >= 3) {
+            updateLocalBounds(exterior);
+            obstacles.push({
+              id: `geo_poly_${obsCounter++}`,
+              name: `${nameTag} (Parte)`,
+              type: isIsland ? "roundabout_island" : "building",
+              shape: "polygon",
+              vertices: exterior,
+              color: isIsland ? "#10b981" : "#ef4444",
+              enabled: true
+            });
+          }
+        }
+      } else if (geomType === "Point") {
+        const [px, py] = toLocalMeters(geom.coordinates);
+        updateLocalBounds([[px, py]]);
+        obstacles.push({
+          id: `geo_point_${obsCounter++}`,
+          name: nameTag.startsWith("Elemento") ? `Pilar / Farola (${nameTag})` : nameTag,
+          type: "column",
+          shape: "circle",
+          x: px,
+          y: py,
+          radius: Number(props.radius || 0.35),
+          heightM: Number(props.heightM || 3.0),
+          color: props.color || "#f97316",
+          enabled: true
+        });
+      }
     }
   }
 
-  // 4. Si hay una entidad de trayectoria detectada, construir la maniobra cinemática
   let maneuver = null;
   if (trajectoryEntity && trajectoryEntity.vertices && trajectoryEntity.vertices.length >= 2) {
     try {
@@ -19379,10 +19727,12 @@ function buildScenarioFromGeoJSON(geojsonInput, options = {}) {
 
   return {
     maneuver,
+    referenceAxes,
     obstacles,
     backgroundEntities,
     bounds,
     trajectoryEntity,
+    sharedOrigin,
     geoCenter: {
       lat: Number(centerLat.toFixed(7)),
       lon: Number(centerLon.toFixed(7))
@@ -19397,6 +19747,22 @@ function buildScenarioFromGeoJSON(geojsonInput, options = {}) {
       opacity: 0.8
     }
   };
+}
+
+/**
+ * Convierte un FeatureCollection o Feature GeoJSON en un escenario completo de TurnSim,
+ * proyectando las geometrías al sistema métrico local y georreferenciando automáticamente
+ * la capa de ortofotos PNOA del IGN.
+ */
+function buildScenarioFromGeoJSON(geojsonInput, options = {}) {
+  const features = parseGeoJSON(geojsonInput);
+  if (features.length === 0) {
+    throw new Error("El archivo GeoJSON no contiene ninguna entidad geométrica procesable.");
+  }
+  return buildScenarioFromGeoJSONFiles(
+    [{ fileName: options.fileName || "escenario.geojson", features, role: options.role || "auto" }],
+    options
+  );
 }
 
 /* === MÓDULO: js/view2d/viewer2d.js === */
@@ -19481,11 +19847,15 @@ class Viewer2D {
     this.interferenceReport = null;
     this.currentStateIndex = 0;
     this.cadBackgroundEntities = []; // Líneas y aristas de contexto DXF
+    this.referenceAxes = []; // Ejes viales de referencia (guía visual + snap magnético + adopción)
+    this.hoveredReferenceAxisIndex = -1;
+    this.onAdoptReferenceAxis = null;
     this.isComputing = false;
 
     this.layers = {
       grid: true,
       cadBackground: true,
+      referenceAxes: true,
       envelope: true,
       margin: true,
       refTraces: true,
@@ -19628,6 +19998,15 @@ class Viewer2D {
 
       // 1. Modo edición gráfica de waypoints
       if (this.waypointMode) {
+        // Shift+Clic sobre un eje vial de referencia: adoptar el eje completo como trayectoria
+        if (e.shiftKey && this.layers.referenceAxes && this.referenceAxes.length > 0) {
+          const axisIdx = this._findReferenceAxisAt(wx, wy, 14);
+          if (axisIdx >= 0 && typeof this.onAdoptReferenceAxis === "function") {
+            this.onAdoptReferenceAxis(this.referenceAxes[axisIdx], { clickWorld: [wx, wy] });
+            return;
+          }
+        }
+
         const hitIdx = this._findWaypointAt(wx, wy);
         if (hitIdx >= 0) {
           this.draggedWaypointIndex = hitIdx;
@@ -19635,9 +20014,12 @@ class Viewer2D {
           return;
         }
 
-        const segIdx = this._findWaypointSegmentAt(wx, wy);
-        const xFixed = Number(wx.toFixed(2));
-        const yFixed = Number(wy.toFixed(2));
+        const wpSnap = e.altKey ? null : this._findSnapPoint(wx, wy, 14);
+        const targetX = wpSnap ? wpSnap.x : wx;
+        const targetY = wpSnap ? wpSnap.y : wy;
+        const segIdx = this._findWaypointSegmentAt(targetX, targetY);
+        const xFixed = Number(targetX.toFixed(2));
+        const yFixed = Number(targetY.toFixed(2));
         if (segIdx >= 0) {
           const prevDir = this._wpDir(this.waypoints[segIdx], this.activeDrawDirection);
           this.waypoints.splice(segIdx + 1, 0, { x: xFixed, y: yFixed, direction: prevDir, directionExplicit: false });
@@ -19729,8 +20111,10 @@ class Viewer2D {
 
       if (this.draggedWaypointIndex >= 0 && this.waypoints[this.draggedWaypointIndex]) {
         const oldWp = this.waypoints[this.draggedWaypointIndex];
-        const xFixed = Number(wx.toFixed(2));
-        const yFixed = Number(wy.toFixed(2));
+        const dragSnap = e.altKey ? null : this._findSnapPoint(wx, wy, 14);
+        this.activeSnap = dragSnap;
+        const xFixed = Number((dragSnap ? dragSnap.x : wx).toFixed(2));
+        const yFixed = Number((dragSnap ? dragSnap.y : wy).toFixed(2));
         if (oldWp && !Array.isArray(oldWp)) {
           this.waypoints[this.draggedWaypointIndex] = { ...oldWp, x: xFixed, y: yFixed };
         } else {
@@ -19745,9 +20129,19 @@ class Viewer2D {
 
       if (this.waypointMode) {
         const prevHover = this.hoveredWaypointIndex;
+        const prevAxisHover = this.hoveredReferenceAxisIndex;
+        const prevSnap = this.activeSnap;
         this.hoveredWaypointIndex = this._findWaypointAt(wx, wy);
-        this.canvas.style.cursor = this.hoveredWaypointIndex >= 0 ? "pointer" : "crosshair";
-        if (prevHover !== this.hoveredWaypointIndex) {
+        this.hoveredReferenceAxisIndex = (e.shiftKey && this.layers.referenceAxes && this.referenceAxes.length > 0)
+          ? this._findReferenceAxisAt(wx, wy, 14)
+          : -1;
+        this.activeSnap = (this.hoveredWaypointIndex < 0 && !e.altKey)
+          ? this._findSnapPoint(wx, wy, 14)
+          : null;
+        this.canvas.style.cursor = (this.hoveredWaypointIndex >= 0 || this.hoveredReferenceAxisIndex >= 0) ? "pointer" : "crosshair";
+        const snapChanged = Boolean(prevSnap) !== Boolean(this.activeSnap) ||
+          (prevSnap && this.activeSnap && (prevSnap.x !== this.activeSnap.x || prevSnap.y !== this.activeSnap.y));
+        if (prevHover !== this.hoveredWaypointIndex || prevAxisHover !== this.hoveredReferenceAxisIndex || snapChanged) {
           this.render();
         }
       }
@@ -20005,53 +20399,122 @@ class Viewer2D {
     };
   }
 
+  _findReferenceAxisAt(wx, wy, tolPx = 14) {
+    if (!this.referenceAxes || this.referenceAxes.length === 0) return -1;
+    const [smx, smy] = this.worldToScreen(wx, wy);
+    let bestIdx = -1;
+    let bestDist = tolPx;
+
+    for (let aIdx = 0; aIdx < this.referenceAxes.length; aIdx++) {
+      const verts = this.referenceAxes[aIdx]?.vertices;
+      if (!verts || verts.length < 2) continue;
+      for (let i = 0; i < verts.length - 1; i++) {
+        const [ax, ay] = this.worldToScreen(verts[i][0], verts[i][1]);
+        const [bx, by] = this.worldToScreen(verts[i + 1][0], verts[i + 1][1]);
+        const dx = bx - ax;
+        const dy = by - ay;
+        const lenSq = dx * dx + dy * dy;
+        const t = lenSq > 1e-6 ? Math.max(0, Math.min(1, ((smx - ax) * dx + (smy - ay) * dy) / lenSq)) : 0;
+        const px = ax + t * dx;
+        const py = ay + t * dy;
+        const d = Math.hypot(smx - px, smy - py);
+        if (d < bestDist) {
+          bestDist = d;
+          bestIdx = aIdx;
+        }
+      }
+    }
+    return bestIdx;
+  }
+
   _findSnapPoint(wx, wy, tolPx = 14) {
     const candidates = [];
 
-    // Obstáculos
+    // 1. Ejes viales de referencia (vértices y punto más cercano sobre tramo)
+    if (this.referenceAxes && this.referenceAxes.length > 0 && this.layers.referenceAxes) {
+      for (const axis of this.referenceAxes) {
+        const verts = axis.vertices;
+        if (!verts || verts.length < 2) continue;
+        const axisLabel = axis.name || axis.layer || "Eje vial";
+        for (const v of verts) {
+          candidates.push({ x: v[0], y: v[1], label: `${axisLabel} (vértice)`, snapType: "axis_vertex", bonusPx: 4 });
+        }
+        // Proyección ortogonal más cercana sobre cada segmento del eje
+        let bestSegPt = null;
+        let bestSegDistSq = Infinity;
+        for (let i = 0; i < verts.length - 1; i++) {
+          const ax = verts[i][0], ay = verts[i][1];
+          const bx = verts[i + 1][0], by = verts[i + 1][1];
+          const dx = bx - ax, dy = by - ay;
+          const lenSq = dx * dx + dy * dy;
+          if (lenSq < 1e-9) continue;
+          const t = Math.max(0, Math.min(1, ((wx - ax) * dx + (wy - ay) * dy) / lenSq));
+          const px = ax + t * dx;
+          const py = ay + t * dy;
+          const dSq = (wx - px) * (wx - px) + (wy - py) * (wy - py);
+          if (dSq < bestSegDistSq) {
+            bestSegDistSq = dSq;
+            bestSegPt = [px, py];
+          }
+        }
+        if (bestSegPt) {
+          candidates.push({
+            x: Number(bestSegPt[0].toFixed(3)),
+            y: Number(bestSegPt[1].toFixed(3)),
+            label: `${axisLabel} (sobre eje)`,
+            snapType: "axis_edge",
+            bonusPx: 1.5
+          });
+        }
+      }
+    }
+
+    // 2. Obstáculos
     if (this.obstacles && this.layers.obstacles) {
       for (const obs of this.obstacles) {
         if (obs.enabled === false) continue;
         const verts = getObstacleVertices(obs);
         for (const v of verts) {
-          candidates.push({ x: v[0], y: v[1], label: obs.name });
+          candidates.push({ x: v[0], y: v[1], label: obs.name, snapType: "obstacle", bonusPx: 0 });
         }
         if (Number.isFinite(obs.x) && Number.isFinite(obs.y)) {
-          candidates.push({ x: obs.x, y: obs.y, label: `${obs.name} (centro)` });
+          candidates.push({ x: obs.x, y: obs.y, label: `${obs.name} (centro)`, snapType: "obstacle", bonusPx: 0 });
         }
       }
     }
 
-    // Vehículo activo en el fotograma actual
+    // 3. Vehículo activo en el fotograma actual
     if (this.simResult && this.simResult.states) {
       const s = this.simResult.states[this.currentStateIndex] || this.simResult.states[0];
       if (s) {
-        candidates.push({ x: s.x, y: s.y, label: "Eje motriz tractora (P_ref)" });
-        if (s.hitch) candidates.push({ x: s.hitch[0], y: s.hitch[1], label: "Quinta rueda (Kingpin)" });
+        candidates.push({ x: s.x, y: s.y, label: "Eje motriz tractora (P_ref)", bonusPx: 0 });
+        if (s.hitch) candidates.push({ x: s.hitch[0], y: s.hitch[1], label: "Quinta rueda (Kingpin)", bonusPx: 0 });
         if (s.tractorFrontAxle && s.tractorFrontAxle.center) {
-          candidates.push({ x: s.tractorFrontAxle.center[0], y: s.tractorFrontAxle.center[1], label: "Eje delantero directriz" });
+          candidates.push({ x: s.tractorFrontAxle.center[0], y: s.tractorFrontAxle.center[1], label: "Eje delantero directriz", bonusPx: 0 });
         }
         if (Number.isFinite(s.tx) && Number.isFinite(s.ty)) {
-          candidates.push({ x: s.tx, y: s.ty, label: "Centro trídem semirremolque" });
+          candidates.push({ x: s.tx, y: s.ty, label: "Centro trídem semirremolque", bonusPx: 0 });
         }
         for (const pt of s.tractorPolygon || []) {
-          candidates.push({ x: pt[0], y: pt[1], label: "Esquina tractora" });
+          candidates.push({ x: pt[0], y: pt[1], label: "Esquina tractora", bonusPx: 0 });
         }
         for (const pt of s.trailerPolygon || []) {
-          candidates.push({ x: pt[0], y: pt[1], label: "Esquina semirremolque" });
+          candidates.push({ x: pt[0], y: pt[1], label: "Esquina semirremolque", bonusPx: 0 });
         }
       }
     }
 
     const [smx, smy] = this.worldToScreen(wx, wy);
     let best = null;
-    let bestDist = tolPx;
+    let bestScore = tolPx;
 
     for (const c of candidates) {
       const [scx, scy] = this.worldToScreen(c.x, c.y);
       const d = Math.hypot(scx - smx, scy - smy);
-      if (d < bestDist) {
-        bestDist = d;
+      if (d > tolPx) continue;
+      const score = d - (c.bonusPx || 0);
+      if (score < bestScore) {
+        bestScore = score;
         best = { ...c, screenX: scx, screenY: scy };
       }
     }
@@ -20089,8 +20552,11 @@ class Viewer2D {
     for (const ent of this.cadBackgroundEntities || []) {
       for (const p of ent.vertices || []) addPt(p[0], p[1]);
     }
+    for (const ax of this.referenceAxes || []) {
+      for (const p of ax.vertices || []) addPt(p[0], p[1]);
+    }
     for (const wp of this.waypoints || []) {
-      addPt(wp[0], wp[1]);
+      addPt(this._wpX(wp), this._wpY(wp));
     }
 
     if (!Number.isFinite(minX)) {
@@ -20109,13 +20575,16 @@ class Viewer2D {
     this.render();
   }
 
-  setData({ vehicle, simResult, obstacles, interferenceReport, cadBackgroundEntities }) {
+  setData({ vehicle, simResult, obstacles, interferenceReport, cadBackgroundEntities, referenceAxes }) {
     this.vehicle = vehicle;
     this.simResult = simResult;
     this.obstacles = obstacles || [];
     this.interferenceReport = interferenceReport || null;
     if (Array.isArray(cadBackgroundEntities)) {
       this.cadBackgroundEntities = cadBackgroundEntities;
+    }
+    if (Array.isArray(referenceAxes)) {
+      this.referenceAxes = referenceAxes;
     }
     if (this.simResult && this.currentStateIndex >= this.simResult.states.length) {
       this.currentStateIndex = 0;
@@ -20190,6 +20659,11 @@ class Viewer2D {
       this._drawCadBackground(ctx);
     }
 
+    // Capa de ejes viales de referencia (guía de trazado y snap magnético)
+    if (this.layers.referenceAxes && this.referenceAxes && this.referenceAxes.length > 0) {
+      this._drawReferenceAxes(ctx);
+    }
+
     // Obstáculos del entorno (edificios, bordillos, vallas, zonas restringidas)
     // Se dibujan SIEMPRE para que los obstáculos y el plano CAD sean visibles
     // antes y durante el trazado o simulación de una maniobra
@@ -20204,10 +20678,13 @@ class Viewer2D {
     if (!hasSimulation) {
       if (this.measureMode || this.measurePoints.length > 0) {
         this._drawMeasurement(ctx);
+      } else if (this.waypointMode && this.activeSnap) {
+        this._drawSnapIndicator(ctx, this.activeSnap);
       }
 
       // Si el visor está completamente limpio (sin simulación, sin CAD y sin obstáculos)
       const hasContent = (this.cadBackgroundEntities && this.cadBackgroundEntities.length > 0) ||
+                         (this.referenceAxes && this.referenceAxes.length > 0) ||
                          (this.obstacles && this.obstacles.length > 0) ||
                          (this.waypoints && this.waypoints.length > 0) ||
                          (this.layers.pnoa && this.pnoaConfig && this.pnoaConfig.enabled);
@@ -20679,6 +21156,23 @@ class Viewer2D {
         this._drawPolygon(ctx, ent.vertices, "rgba(30, 41, 59, 0.35)", "rgba(148, 163, 184, 0.75)", 1.2, []);
       } else {
         this._drawPolyline(ctx, ent.vertices, "rgba(148, 163, 184, 0.70)", 1.2, []);
+      }
+    }
+    ctx.restore();
+  }
+
+  _drawReferenceAxes(ctx) {
+    if (!this.referenceAxes || this.referenceAxes.length === 0) return;
+    ctx.save();
+    for (let i = 0; i < this.referenceAxes.length; i++) {
+      const ax = this.referenceAxes[i];
+      if (!ax.vertices || ax.vertices.length < 2) continue;
+      const isHovered = i === this.hoveredReferenceAxisIndex;
+      if (isHovered) {
+        this._drawPolyline(ctx, ax.vertices, "rgba(34, 211, 238, 0.38)", 7.5, []);
+        this._drawPolyline(ctx, ax.vertices, "#67e8f9", 2.8, [14, 5, 3, 5]);
+      } else {
+        this._drawPolyline(ctx, ax.vertices, "rgba(6, 182, 212, 0.90)", 2.1, [14, 5, 3, 5]);
       }
     }
     ctx.restore();
@@ -21230,10 +21724,16 @@ class Viewer2D {
 
     // 3. Banner informativo en modo edición (situado en la parte inferior para despejar por completo la botonera superior)
     if (this.waypointMode) {
+      if (this.activeSnap) {
+        this._drawSnapIndicator(ctx, this.activeSnap);
+      }
       const modeLabel = this.trajectoryMode === "spline" ? "SPLINE CAD" : "POLILÍNEA CAD";
       const dirLabel = this.activeDrawDirection === -1 ? "◀ RETROCESO (R)" : "▶ AVANCE (D)";
       const sharpWarning = hasSharpCurvature ? ` · ⚠️ Radio cerrado (${minObservedR.toFixed(1)} m)` : "";
-      const bannerText = `✏️ [${modeLabel} · ${dirLabel}]: Clic añadir · Tecla R: invertir · Clic dcho. vértice: menú${sharpWarning}`;
+      const axisHint = (this.referenceAxes && this.referenceAxes.length > 0 && this.layers.referenceAxes)
+        ? " · Shift+Clic eje: adoptar · Alt: sin snap"
+        : "";
+      const bannerText = `✏️ [${modeLabel} · ${dirLabel}]: Clic añadir · Tecla R: invertir${axisHint}${sharpWarning}`;
       ctx.font = "600 11px 'Segoe UI', system-ui, sans-serif";
       const bw = ctx.measureText(bannerText).width + 24;
       const bx = (this.width - bw) / 2;
@@ -21358,6 +21858,7 @@ class Viewer3D {
       wheelTraces: true,
       obstacles: true,
       cadBackground: true,
+      referenceAxes: true,
       dimensions: true
     };
 
@@ -21366,6 +21867,7 @@ class Viewer3D {
     this.vehicle = null;
     this.obstacles = [];
     this.cadBackgroundEntities = [];
+    this.referenceAxes = [];
     this.interferenceReport = null;
 
     if (!this.available) {
@@ -21485,6 +21987,7 @@ class Viewer3D {
 
     // Grupos dinámicos por capa
     this.cadBackgroundGroup = new THREE.Group();
+    this.referenceAxesGroup = new THREE.Group();
     this.envelopeGroup = new THREE.Group();
     this.marginGroup = new THREE.Group();
     this.refTracesGroup = new THREE.Group();
@@ -21494,6 +21997,7 @@ class Viewer3D {
     this.vehicleGroup = new THREE.Group();
 
     this.scene.add(this.cadBackgroundGroup);
+    this.scene.add(this.referenceAxesGroup);
     this.scene.add(this.marginGroup);
     this.scene.add(this.envelopeGroup);
     this.scene.add(this.wheelTracesGroup);
@@ -21631,11 +22135,14 @@ class Viewer3D {
     }
   }
 
-  setData({ vehicle, simResult, obstacles, interferenceReport, cadBackgroundEntities, waypoints }) {
+  setData({ vehicle, simResult, obstacles, interferenceReport, cadBackgroundEntities, referenceAxes, waypoints }) {
     this.vehicle = vehicle;
     this.simResult = simResult;
     this.obstacles = obstacles || [];
     this.cadBackgroundEntities = cadBackgroundEntities || this.cadBackgroundEntities || [];
+    if (Array.isArray(referenceAxes)) {
+      this.referenceAxes = referenceAxes;
+    }
     this.interferenceReport = interferenceReport || null;
     if (Array.isArray(waypoints)) {
       this.waypoints = waypoints;
@@ -21644,6 +22151,7 @@ class Viewer3D {
     if (!this.available) return;
 
     this._rebuildCadBackground();
+    this._rebuildReferenceAxes();
     this._rebuildObstacles();
 
     if (!this.simResult || !this.simResult.states || !this.simResult.states.length) {
@@ -21691,6 +22199,16 @@ class Viewer3D {
     }
   }
 
+  _rebuildReferenceAxes() {
+    if (!this.referenceAxesGroup) return;
+    this._clearGroup(this.referenceAxesGroup);
+    if (!this.referenceAxes || this.referenceAxes.length === 0) return;
+    for (const ax of this.referenceAxes) {
+      if (!ax.vertices || ax.vertices.length < 2) continue;
+      this._addPolyline3D(this.referenceAxesGroup, ax.vertices, 0x06b6d4, 0.025, true);
+    }
+  }
+
   updateObstaclesAndInterferences(obstacles, interferenceReport) {
     this.obstacles = obstacles || [];
     this.interferenceReport = interferenceReport || null;
@@ -21705,6 +22223,9 @@ class Viewer3D {
     this.gridHelper.visible = Boolean(this.layers.grid);
     if (this.cadBackgroundGroup) {
       this.cadBackgroundGroup.visible = Boolean(this.layers.cadBackground);
+    }
+    if (this.referenceAxesGroup) {
+      this.referenceAxesGroup.visible = Boolean(this.layers.referenceAxes);
     }
     this.envelopeGroup.visible = Boolean(this.layers.envelope);
     this.marginGroup.visible = Boolean(this.layers.margin);
@@ -22311,8 +22832,10 @@ class SweptPathApp {
       segments: []
     };
     this.obstacles = [];
+    this.referenceAxes = [];
     this.cadBackgroundEntities = [];
     this.currentParsedDXF = null;
+    this.activeGeoOrigin = null;
 
     this.discretization = {
       straightStepM: 0.15,
@@ -22323,8 +22846,6 @@ class SweptPathApp {
     this.viewMode = "2d"; // '2d' | '3d' | 'split'
     this.simResult = null;
     this.interferenceReport = null;
-    this.cadBackgroundEntities = [];
-    this.currentParsedDXF = null;
 
     // Estado de reproducción y temporizadores de recálculo
     this.isPlaying = false;
@@ -22425,6 +22946,10 @@ class SweptPathApp {
       this.showToast(`Cúspide detectada en P${wpIndex + 1}: cambio automático a ${label}`, "info", 2600);
     };
 
+    this.viewer2D.onAdoptReferenceAxis = (axis, meta = {}) => {
+      this._adoptReferenceAxisAsWaypoints(axis, meta);
+    };
+
     this._initUI();
     this.history.pushState(this.getSnapshot());
     this._updateUndoRedoButtonsUI();
@@ -22477,6 +23002,7 @@ class SweptPathApp {
       selectedScenarioId: this.selectedScenarioId,
       maneuver: JSON.parse(JSON.stringify(this.maneuver)),
       obstacles: JSON.parse(JSON.stringify(this.obstacles)),
+      referenceAxes: JSON.parse(JSON.stringify(this.referenceAxes || [])),
       safetyMarginM: this.safetyMarginM,
       discretization: JSON.parse(JSON.stringify(this.discretization))
     };
@@ -22491,6 +23017,9 @@ class SweptPathApp {
     this.selectedScenarioId = s.selectedScenarioId || this.selectedScenarioId;
     this.maneuver = JSON.parse(JSON.stringify(s.maneuver));
     this.obstacles = JSON.parse(JSON.stringify(s.obstacles));
+    if (Array.isArray(s.referenceAxes)) {
+      this.referenceAxes = JSON.parse(JSON.stringify(s.referenceAxes));
+    }
     this.safetyMarginM = typeof s.safetyMarginM === "number" ? s.safetyMarginM : 0.30;
     if (s.discretization) {
       this.discretization = { ...this.discretization, ...s.discretization };
@@ -23371,7 +23900,9 @@ class SweptPathApp {
           segments: []
         };
         this.obstacles = [];
+        this.referenceAxes = [];
         this.cadBackgroundEntities = [];
+        this.activeGeoOrigin = null;
         this._populateManeuverInputs();
         this._renderSegmentsListUI();
         this._renderObstaclesListUI();
@@ -23383,7 +23914,9 @@ class SweptPathApp {
       this.safetyMarginM = sc.safetyMarginM;
       this.maneuver = JSON.parse(JSON.stringify(sc.maneuver));
       this.obstacles = JSON.parse(JSON.stringify(sc.obstacles));
+      this.referenceAxes = [];
       this.cadBackgroundEntities = [];
+      this.activeGeoOrigin = null;
       document.getElementById("inp-safety-margin").value = this.safetyMarginM;
       this._populateManeuverInputs();
       this._renderObstaclesListUI();
@@ -23855,6 +24388,7 @@ class SweptPathApp {
       ["chk-layer-refs", "refTraces"],
       ["chk-layer-ghosts", "ghosts"],
       ["chk-layer-obstacles", "obstacles"],
+      ["chk-layer-ref-axes", "referenceAxes"],
       ["chk-layer-cad-bg", "cadBackground"],
       ["chk-layer-dims", "dimensions"],
       ["chk-layer-axles", "axlesAndPoints"],
@@ -23964,6 +24498,7 @@ class SweptPathApp {
         obstacles: this.obstacles,
         layerVisibility: this.viewer2D.layers,
         cadBackgroundEntities: this.cadBackgroundEntities,
+        referenceAxes: this.referenceAxes,
         diligence: this._getDiligenceData()
       });
     });
@@ -24757,7 +25292,8 @@ class SweptPathApp {
           simResult: this.simResult,
           obstacles: this.obstacles,
           interferenceReport: this.interferenceReport,
-          cadBackgroundEntities: this.cadBackgroundEntities
+          cadBackgroundEntities: this.cadBackgroundEntities,
+          referenceAxes: this.referenceAxes
         });
         this.viewer3D.updateObstaclesAndInterferences(this.obstacles, this.interferenceReport);
         this._updateTopTelemetryBar();
@@ -24776,6 +25312,7 @@ class SweptPathApp {
     if (!this.maneuver || !this.maneuver.segments || this.maneuver.segments.length === 0) {
       const hasSceneContent =
         (this.cadBackgroundEntities && this.cadBackgroundEntities.length > 0) ||
+        (this.referenceAxes && this.referenceAxes.length > 0) ||
         (this.obstacles && this.obstacles.length > 0) ||
         (this.viewer2D && this.viewer2D.waypoints && this.viewer2D.waypoints.length > 0) ||
         (this.viewer2D && this.viewer2D.layers && this.viewer2D.layers.pnoa && this.viewer2D.pnoaConfig && this.viewer2D.pnoaConfig.enabled);
@@ -24798,7 +25335,8 @@ class SweptPathApp {
           simResult: null,
           obstacles: [],
           interferenceReport: null,
-          cadBackgroundEntities: []
+          cadBackgroundEntities: [],
+          referenceAxes: []
         });
 
         this.viewer3D.setData({
@@ -24806,7 +25344,8 @@ class SweptPathApp {
           simResult: null,
           obstacles: [],
           interferenceReport: null,
-          cadBackgroundEntities: []
+          cadBackgroundEntities: [],
+          referenceAxes: []
         });
 
         if (fitCamera) {
@@ -24850,7 +25389,8 @@ class SweptPathApp {
         simResult: this.simResult,
         obstacles: this.obstacles,
         interferenceReport: null,
-        cadBackgroundEntities: this.cadBackgroundEntities
+        cadBackgroundEntities: this.cadBackgroundEntities,
+        referenceAxes: this.referenceAxes
       });
 
       this.viewer3D.setData({
@@ -24859,6 +25399,7 @@ class SweptPathApp {
         obstacles: this.obstacles,
         interferenceReport: null,
         cadBackgroundEntities: this.cadBackgroundEntities,
+        referenceAxes: this.referenceAxes,
         waypoints: this.viewer2D?.waypoints
       });
 
@@ -24923,7 +25464,8 @@ class SweptPathApp {
           simResult: this.simResult,
           obstacles: this.obstacles,
           interferenceReport: this.interferenceReport,
-          cadBackgroundEntities: this.cadBackgroundEntities
+          cadBackgroundEntities: this.cadBackgroundEntities,
+          referenceAxes: this.referenceAxes
         });
 
         const data3D = {
@@ -24932,6 +25474,7 @@ class SweptPathApp {
           obstacles: this.obstacles,
           interferenceReport: this.interferenceReport,
           cadBackgroundEntities: this.cadBackgroundEntities,
+          referenceAxes: this.referenceAxes,
           waypoints: this.viewer2D?.waypoints
         };
         if (this.viewMode === "2d") {
@@ -25107,136 +25650,351 @@ class SweptPathApp {
       dropZone.addEventListener("drop", (e) => {
         e.preventDefault();
         dropZone.classList.remove("dragover");
-        if (e.dataTransfer && e.dataTransfer.files && e.dataTransfer.files[0]) {
-          this._loadVectorFile(e.dataTransfer.files[0]);
+        if (e.dataTransfer && e.dataTransfer.files && e.dataTransfer.files.length > 0) {
+          this._loadVectorFiles(e.dataTransfer.files);
         }
       });
 
       fileInput.addEventListener("change", (e) => {
-        if (e.target.files && e.target.files[0]) {
-          this._loadVectorFile(e.target.files[0]);
+        if (e.target.files && e.target.files.length > 0) {
+          this._loadVectorFiles(e.target.files);
+          fileInput.value = "";
         }
       });
+    }
+  }
+
+  _loadVectorFiles(fileList) {
+    const files = Array.from(fileList || []).filter(Boolean);
+    if (files.length === 0) return;
+
+    const geoFiles = files.filter((f) => {
+      const n = (f.name || "").toLowerCase();
+      return n.endsWith(".geojson") || n.endsWith(".json");
+    });
+    const dxfFiles = files.filter((f) => (f.name || "").toLowerCase().endsWith(".dxf"));
+
+    if (geoFiles.length > 0) {
+      this._loadGeoJsonFiles(geoFiles);
+    } else if (dxfFiles.length > 0) {
+      this._loadDxfFile(dxfFiles[0]);
+    } else {
+      this._loadDxfFile(files[0]);
     }
   }
 
   _loadVectorFile(file) {
     if (!file) return;
-    const nameLower = (file.name || "").toLowerCase();
-    if (nameLower.endsWith(".geojson") || nameLower.endsWith(".json")) {
-      this._loadGeoJsonFile(file);
-    } else {
-      this._loadDxfFile(file);
+    this._loadVectorFiles([file]);
+  }
+
+  _readFileAsText(file) {
+    return new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = (e) => resolve(e.target.result);
+      reader.onerror = () => reject(new Error(`No se pudo leer el archivo ${file.name}.`));
+      reader.readAsText(file);
+    });
+  }
+
+  async _loadGeoJsonFiles(files) {
+    if (!files || files.length === 0) return;
+    try {
+      const inspected = [];
+      for (const file of files) {
+        const text = await this._readFileAsText(file);
+        inspected.push(inspectGeoJSONFile(text, file.name));
+      }
+      this._showGeoJsonImportModal(inspected);
+    } catch (err) {
+      console.error("Error al procesar archivo(s) GeoJSON:", err);
+      this.showToast(`Error al procesar GeoJSON: ${err.message}`, "danger");
     }
   }
 
-  _loadGeoJsonFile(file) {
-    if (!file) return;
-    const reader = new FileReader();
-    reader.onload = (e) => {
-      try {
-        const text = e.target.result;
-        const scenario = buildScenarioFromGeoJSON(text);
-
-        // 1. Registrar como escenario personalizado en el selector
-        this.selectedScenarioId = "custom_geojson";
-        const scSelect = document.getElementById("select-scenario");
-        if (scSelect) {
-          let customOpt = scSelect.querySelector("option[value='custom_geojson']");
-          if (!customOpt) {
-            customOpt = document.createElement("option");
-            customOpt.value = "custom_geojson";
-            scSelect.appendChild(customOpt);
-          }
-          customOpt.textContent = `GeoJSON: ${file.name}`;
-          scSelect.value = "custom_geojson";
-        }
-
-        // 2. Obstáculos y entidades de fondo CAD
-        this.obstacles = scenario.obstacles || [];
-        this._renderObstaclesListUI();
-        this.cadBackgroundEntities = scenario.backgroundEntities || [];
-
-        // 3. Maniobra (eje deducido o vehículo en reposo en el origen del plano)
-        if (scenario.maneuver && scenario.maneuver.segments && scenario.maneuver.segments.length > 0) {
-          this.maneuver = scenario.maneuver;
-          this.viewer2D.clearWaypoints(true);
-        } else {
-          this.maneuver = {
-            startPose: {
-              x: scenario.bounds ? Number((scenario.bounds.minX + 5).toFixed(2)) : 0,
-              y: scenario.bounds ? Number((scenario.bounds.minY + 5).toFixed(2)) : 0,
-              headingDeg: 0,
-              initialArticulationDeg: 0
-            },
-            segments: []
-          };
-          this.viewer2D.clearWaypoints(true);
-        }
-        this._populateManeuverInputs();
-        this._renderSegmentsListUI();
-
-        // 4. Georreferenciación recíproca con PNOA (IGN)
-        if (scenario.pnoaConfig) {
-          this.viewer2D.setPnoaConfig(scenario.pnoaConfig);
-          const chkPnoa = document.getElementById("chk-layer-pnoa");
-          if (chkPnoa) chkPnoa.checked = true;
-          const btnPnoa = document.getElementById("btn-toggle-pnoa");
-          if (btnPnoa) {
-            btnPnoa.classList.add("active");
-            btnPnoa.style.background = "rgba(2, 132, 199, 0.4)";
-          }
-          const modalLat = document.getElementById("inp-pnoa-lat");
-          const modalLon = document.getElementById("inp-pnoa-lon");
-          if (modalLat) modalLat.value = scenario.pnoaConfig.centerLat;
-          if (modalLon) modalLon.value = scenario.pnoaConfig.centerLon;
-        }
-
-        // 5. Asignar inmediatamente a los visores 2D y 3D
-        this.viewer2D.setData({
-          vehicle: this.vehicle,
-          simResult: this.simResult,
-          obstacles: this.obstacles,
-          interferenceReport: this.interferenceReport,
-          cadBackgroundEntities: this.cadBackgroundEntities
-        });
-
-        this.viewer3D.setData({
-          vehicle: this.vehicle,
-          simResult: this.simResult,
-          obstacles: this.obstacles,
-          interferenceReport: this.interferenceReport,
-          cadBackgroundEntities: this.cadBackgroundEntities,
-          waypoints: this.viewer2D?.waypoints
-        });
-
-        // 6. Recalcular simulación cinemática o encuadrar en reposo
-        if (this.maneuver && this.maneuver.segments && this.maneuver.segments.length > 0) {
-          this.recomputeAll(true);
-        } else {
-          this.recomputeAll(false);
-          this.viewer2D.fitToScene();
-          this.viewer3D.fitToScene();
-        }
-
-        this.history.pushState(this.getSnapshot());
-        this._updateUndoRedoButtonsUI();
-
-        const totalEnts = this.obstacles.length + this.cadBackgroundEntities.length;
-        this.showToast(
-          `Plano GeoJSON cargado (${totalEnts} elementos). Ortofoto aérea oficial PNOA georreferenciada y activada.`,
-          "success",
-          4000
-        );
-      } catch (err) {
-        console.error("Error al procesar archivo GeoJSON:", err);
-        this.showToast(`Error al procesar el archivo GeoJSON: ${err.message}`, "danger");
+  _applyPnoaConfigToUI(pnoaConfig) {
+    if (!pnoaConfig) return;
+    this.viewer2D.setPnoaConfig(pnoaConfig);
+    const chkPnoa = document.getElementById("chk-layer-pnoa");
+    if (chkPnoa) chkPnoa.checked = Boolean(pnoaConfig.enabled);
+    const btnPnoa = document.getElementById("btn-toggle-pnoa");
+    if (btnPnoa) {
+      if (pnoaConfig.enabled) {
+        btnPnoa.classList.add("active");
+        btnPnoa.style.background = "rgba(2, 132, 199, 0.4)";
+      } else {
+        btnPnoa.classList.remove("active");
+        btnPnoa.style.background = "";
       }
+    }
+    const modalLat = document.getElementById("inp-pnoa-lat");
+    const modalLon = document.getElementById("inp-pnoa-lon");
+    if (modalLat) modalLat.value = pnoaConfig.centerLat;
+    if (modalLon) modalLon.value = pnoaConfig.centerLon;
+  }
+
+  _showGeoJsonImportModal(inspectedFiles) {
+    const existing = document.getElementById("geojson-modal-container");
+    if (existing) existing.remove();
+
+    const backdrop = document.createElement("div");
+    backdrop.id = "geojson-modal-container";
+    backdrop.className = "modal-backdrop";
+    backdrop.setAttribute("role", "dialog");
+    backdrop.setAttribute("aria-modal", "true");
+    backdrop.setAttribute("aria-labelledby", "modal-geojson-title");
+
+    const hasAnyUtm = inspectedFiles.some((f) => f.isUtm);
+    const canAppend = Boolean(
+      this.activeGeoOrigin &&
+      ((this.obstacles && this.obstacles.length > 0) ||
+       (this.referenceAxes && this.referenceAxes.length > 0) ||
+       (this.cadBackgroundEntities && this.cadBackgroundEntities.length > 0))
+    );
+
+    const roleOptions = [
+      ["reference_axes", "Ejes viales de referencia (guía + snap)"],
+      ["obstacles", "Obstáculos físicos (colisión)"],
+      ["boundaries", "Bordes de calzada / bordillos"],
+      ["restricted", "Zonas restringidas / excluidas"],
+      ["background", "Fondo contextual (solo visual)"],
+      ["auto", "Detección automática por propiedades"]
+    ];
+
+    const rowsHtml = inspectedFiles.map((info, idx) => {
+      const geomSummary = Object.entries(info.geomCounts || {})
+        .map(([k, v]) => `${v} ${k}`)
+        .join(", ");
+      const crsLabel = info.isUtm ? "UTM" : "WGS84";
+      const opts = roleOptions
+        .map(([val, lbl]) => `<option value="${val}" ${info.suggestedRole === val ? "selected" : ""}>${escapeHTML(lbl)}</option>`)
+        .join("");
+      return `
+        <div class="layer-field-row" style="margin-bottom:10px;padding:8px;background:rgba(15,23,42,0.55);border:1px solid #334155;border-radius:6px;">
+          <div class="layer-field-label" style="margin-bottom:4px;">
+            <span style="font-weight:600;color:#e2e8f0;">📄 ${escapeHTML(info.fileName)}</span>
+            <span class="layer-match-badge">${info.featureCount} ent. · ${crsLabel}</span>
+          </div>
+          <div style="font-size:10.5px;color:#94a3b8;margin-bottom:6px;">Geometrías: ${escapeHTML(geomSummary || "Ninguna")}</div>
+          <select id="modal-geojson-role-${idx}" style="width:100%;">${opts}</select>
+        </div>
+      `;
+    }).join("");
+
+    backdrop.innerHTML = `
+      <div class="modal-dialog">
+        <div class="modal-header">
+          <h3 id="modal-geojson-title">🌍 Importación GIS GeoJSON (${inspectedFiles.length} archivo${inspectedFiles.length > 1 ? "s" : ""})</h3>
+          <button type="button" class="btn btn-sm btn-outline" id="btn-geojson-modal-close" aria-label="Cerrar ventana">✕</button>
+        </div>
+        <div class="modal-body">
+          <p style="margin-top:0;margin-bottom:12px;color:#94a3b8;font-size:11px;">
+            Todos los archivos seleccionados se proyectarán sobre un <strong>origen georreferenciado común</strong> alineado con la ortofoto PNOA. Confirme el rol de cada archivo:
+          </p>
+          ${rowsHtml}
+          ${hasAnyUtm ? `
+            <div class="form-row" style="margin-top:10px;">
+              <div>
+                <label class="form-label" for="modal-geojson-utm-zone">Huso UTM (ETRS89 España)</label>
+                <select id="modal-geojson-utm-zone" style="width:100%;">
+                  <option value="28">Huso 28 (Canarias)</option>
+                  <option value="29">Huso 29 (Galicia / Oeste)</option>
+                  <option value="30" selected>Huso 30 (Centro / Península)</option>
+                  <option value="31">Huso 31 (Cataluña / Baleares)</option>
+                </select>
+              </div>
+            </div>
+          ` : ""}
+          ${canAppend ? `
+            <div style="margin-top:10px;padding:8px;background:rgba(6,182,212,0.1);border:1px solid rgba(6,182,212,0.35);border-radius:6px;">
+              <label style="display:flex;align-items:center;gap:8px;font-size:11.5px;color:#e2e8f0;cursor:pointer;">
+                <input type="checkbox" id="modal-geojson-append" checked />
+                <span>Añadir a la escena actual (conservar capas y origen georreferenciado existentes)</span>
+              </label>
+            </div>
+          ` : ""}
+        </div>
+        <div class="modal-footer">
+          <button type="button" class="btn btn-outline btn-sm" id="btn-geojson-modal-cancel">Cancelar</button>
+          <button type="button" class="btn btn-primary btn-sm" id="btn-geojson-modal-apply">✓ Cargar capas GeoJSON</button>
+        </div>
+      </div>
+    `;
+
+    document.body.appendChild(backdrop);
+
+    const onKeydownModal = (e) => {
+      if (e.key === "Escape") closeModal();
     };
-    reader.onerror = () => {
-      this.showToast("No se pudo leer el archivo GeoJSON seleccionado.", "danger");
+    window.addEventListener("keydown", onKeydownModal);
+    const closeModal = () => {
+      window.removeEventListener("keydown", onKeydownModal);
+      backdrop.remove();
     };
-    reader.readAsText(file);
+
+    document.getElementById("btn-geojson-modal-close").addEventListener("click", closeModal);
+    document.getElementById("btn-geojson-modal-cancel").addEventListener("click", closeModal);
+
+    document.getElementById("btn-geojson-modal-apply").addEventListener("click", () => {
+      try {
+        const utmZoneEl = document.getElementById("modal-geojson-utm-zone");
+        const utmZone = utmZoneEl ? parseInt(utmZoneEl.value, 10) || 30 : 30;
+        const appendEl = document.getElementById("modal-geojson-append");
+        const appendMode = Boolean(appendEl && appendEl.checked && this.activeGeoOrigin);
+
+        const entries = inspectedFiles.map((info, idx) => ({
+          fileName: info.fileName,
+          features: info.features,
+          role: document.getElementById(`modal-geojson-role-${idx}`)?.value || info.suggestedRole || "auto"
+        }));
+
+        const scenario = buildScenarioFromGeoJSONFiles(entries, {
+          utmZone,
+          sharedOrigin: appendMode ? this.activeGeoOrigin : null
+        });
+
+        this._applyGeoJsonScenario(scenario, inspectedFiles.map((f) => f.fileName), appendMode);
+        closeModal();
+      } catch (err) {
+        console.error("Error al aplicar capas GeoJSON:", err);
+        this.showToast(`Error al cargar GeoJSON: ${err.message}`, "danger");
+      }
+    });
+  }
+
+  _applyGeoJsonScenario(scenario, fileNames = [], appendMode = false) {
+    this.selectedScenarioId = "custom_geojson";
+    const scSelect = document.getElementById("select-scenario");
+    if (scSelect) {
+      let customOpt = scSelect.querySelector("option[value='custom_geojson']");
+      if (!customOpt) {
+        customOpt = document.createElement("option");
+        customOpt.value = "custom_geojson";
+        scSelect.appendChild(customOpt);
+      }
+      const label = fileNames.length > 1 ? `GeoJSON (${fileNames.length} capas)` : `GeoJSON: ${fileNames[0] || "Escenario"}`;
+      customOpt.textContent = label;
+      scSelect.value = "custom_geojson";
+    }
+
+    if (appendMode) {
+      this.obstacles = [...(this.obstacles || []), ...(scenario.obstacles || [])];
+      this.referenceAxes = [...(this.referenceAxes || []), ...(scenario.referenceAxes || [])];
+      this.cadBackgroundEntities = [...(this.cadBackgroundEntities || []), ...(scenario.backgroundEntities || [])];
+    } else {
+      this.obstacles = scenario.obstacles || [];
+      this.referenceAxes = scenario.referenceAxes || [];
+      this.cadBackgroundEntities = scenario.backgroundEntities || [];
+      this.activeGeoOrigin = scenario.sharedOrigin || null;
+    }
+
+    this._renderObstaclesListUI();
+
+    if (!appendMode) {
+      if (scenario.maneuver && scenario.maneuver.segments && scenario.maneuver.segments.length > 0) {
+        this.maneuver = scenario.maneuver;
+        this.viewer2D.clearWaypoints(true);
+      } else {
+        this.maneuver = {
+          startPose: {
+            x: scenario.bounds ? Number((scenario.bounds.minX + 5).toFixed(2)) : 0,
+            y: scenario.bounds ? Number((scenario.bounds.minY + 5).toFixed(2)) : 0,
+            headingDeg: 0,
+            initialArticulationDeg: 0
+          },
+          segments: []
+        };
+        this.viewer2D.clearWaypoints(true);
+      }
+      this._populateManeuverInputs();
+      this._renderSegmentsListUI();
+      if (scenario.pnoaConfig) {
+        this._applyPnoaConfigToUI(scenario.pnoaConfig);
+      }
+    }
+
+    this.viewer2D.setData({
+      vehicle: this.vehicle,
+      simResult: this.simResult,
+      obstacles: this.obstacles,
+      interferenceReport: this.interferenceReport,
+      cadBackgroundEntities: this.cadBackgroundEntities,
+      referenceAxes: this.referenceAxes
+    });
+
+    this.viewer3D.setData({
+      vehicle: this.vehicle,
+      simResult: this.simResult,
+      obstacles: this.obstacles,
+      interferenceReport: this.interferenceReport,
+      cadBackgroundEntities: this.cadBackgroundEntities,
+      referenceAxes: this.referenceAxes,
+      waypoints: this.viewer2D?.waypoints
+    });
+
+    if (this.maneuver && this.maneuver.segments && this.maneuver.segments.length > 0) {
+      this.recomputeAll(!appendMode);
+    } else {
+      this.recomputeAll(false);
+      this.viewer2D.fitToScene();
+      this.viewer3D.fitToScene();
+    }
+
+    this.history.pushState(this.getSnapshot());
+    this._updateUndoRedoButtonsUI();
+
+    const axesCount = this.referenceAxes.length;
+    const obsCount = this.obstacles.length;
+    const bgCount = this.cadBackgroundEntities.length;
+    this.showToast(
+      `GeoJSON ${appendMode ? "añadido" : "cargado"}: ${axesCount} ejes de referencia, ${obsCount} obstáculos, ${bgCount} elem. de fondo. Ortofoto PNOA alineada.`,
+      "success",
+      4500
+    );
+  }
+
+  _adoptReferenceAxisAsWaypoints(axis, meta = {}) {
+    if (!axis || !Array.isArray(axis.vertices) || axis.vertices.length < 2) return;
+    let pts = axis.vertices.map(([x, y]) => [Number(x), Number(y)]);
+
+    // Orientar el eje desde el extremo más cercano al punto donde hizo Shift+Clic el usuario
+    if (Array.isArray(meta.clickWorld) && meta.clickWorld.length >= 2) {
+      const [cx, cy] = meta.clickWorld;
+      const dStart = Math.hypot(pts[0][0] - cx, pts[0][1] - cy);
+      const dEnd = Math.hypot(pts[pts.length - 1][0] - cx, pts[pts.length - 1][1] - cy);
+      if (dEnd < dStart) {
+        pts = pts.reverse();
+      }
+    }
+
+    // Simplificar si el eje CAD/GIS viene hiper-densificado (> 40 vértices) preservando puntos clave
+    if (pts.length > 40) {
+      const reduced = [pts[0]];
+      let accum = 0;
+      for (let i = 1; i < pts.length - 1; i++) {
+        accum += Math.hypot(pts[i][0] - pts[i - 1][0], pts[i][1] - pts[i - 1][1]);
+        if (accum >= 3.0) {
+          reduced.push(pts[i]);
+          accum = 0;
+        }
+      }
+      reduced.push(pts[pts.length - 1]);
+      pts = reduced;
+    }
+
+    const dir = this.viewer2D?.activeDrawDirection === -1 ? -1 : 1;
+    const wps = pts.map(([x, y]) => ({
+      x: Number(x.toFixed(2)),
+      y: Number(y.toFixed(2)),
+      direction: dir,
+      directionExplicit: false
+    }));
+
+    this.viewer2D.setWaypoints(wps);
+    if (typeof this.viewer2D.onWaypointsChange === "function") {
+      this.viewer2D.onWaypointsChange(wps, { isDragging: false });
+    }
+    this.showToast(`Eje «${axis.name || axis.layer}» adoptado como trayectoria (${wps.length} vértices).`, "success", 3000);
   }
 
   _loadDxfFile(file) {
@@ -25298,67 +26056,95 @@ class SweptPathApp {
       return html;
     };
 
+    const refAxesMatchBadge = (suggested.referenceAxisLayers && suggested.referenceAxisLayers.length > 0)
+      ? `<span class="layer-match-badge">✓ ${suggested.referenceAxisLayers.length} capa(s) de ejes</span>`
+      : "";
+
     const trajMatchBadge = suggested.trajectoryLayer
       ? `<span class="layer-match-badge">✓ Detectada automáticamente</span>`
-      : `<span style="font-size:10px;color:#f59e0b;">Selección requerida o manual</span>`;
+      : `<span style="font-size:10px;color:#94a3b8;">Opcional (recomendado usar Ejes de referencia + Trazar ruta)</span>`;
 
     const obsMatchBadge = suggested.obstacleLayers.length > 0
       ? `<span class="layer-match-badge">✓ ${suggested.obstacleLayers.length} capa(s) sugeridas</span>`
       : "";
+
+    // Detectar si las coordenadas del DXF parecen UTM (ETRS89 España) para ofrecer alineación PNOA
+    let rawMinX = Infinity, rawMaxX = -Infinity, rawMinY = Infinity, rawMaxY = -Infinity;
+    const scalePreview = parsedDxf.suggestedScale || 1.0;
+    for (const ent of parsedDxf.entities || []) {
+      for (const pt of ent.vertices || []) {
+        const vx = pt[0] * scalePreview;
+        const vy = pt[1] * scalePreview;
+        if (vx < rawMinX) rawMinX = vx;
+        if (vx > rawMaxX) rawMaxX = vx;
+        if (vy < rawMinY) rawMinY = vy;
+        if (vy > rawMaxY) rawMaxY = vy;
+      }
+    }
+    const midX = 0.5 * (rawMinX + rawMaxX);
+    const midY = 0.5 * (rawMinY + rawMaxY);
+    const isUtmPreview = Number.isFinite(midX) && midX > 100000 && midX < 900000 && midY > 3000000 && midY < 5500000;
+
+    // Lista de capas candidatas a fondo contextual (todas con checkbox marcado por defecto)
+    const assignedSet = new Set([
+      ...(suggested.referenceAxisLayers || []),
+      ...(suggested.obstacleLayers || []),
+      ...(suggested.boundaryLayers || []),
+      ...(suggested.restrictedLayers || []),
+      ...(suggested.trajectoryLayer ? [suggested.trajectoryLayer] : [])
+    ]);
+    const bgLayersHtml = layers.map((l) => {
+      const stats = parsedDxf.layerStats[l];
+      const count = stats ? stats.count : 0;
+      const safeL = escapeHTML(l);
+      const isSpecial = assignedSet.has(l);
+      return `
+        <label style="display:flex;align-items:center;gap:6px;font-size:11px;color:${isSpecial ? "#64748b" : "#cbd5e1"};padding:2px 0;cursor:pointer;">
+          <input type="checkbox" class="modal-bg-layer-chk" value="${safeL}" checked />
+          <span>${safeL}</span>
+          <span style="color:#64748b;font-size:10px;">(${count} ent.)</span>
+        </label>
+      `;
+    }).join("");
 
     backdrop.setAttribute("role", "dialog");
     backdrop.setAttribute("aria-modal", "true");
     backdrop.setAttribute("aria-labelledby", "modal-dxf-title");
 
     backdrop.innerHTML = `
-      <div class="modal-dialog">
+      <div class="modal-dialog" style="max-height:88vh;display:flex;flex-direction:column;">
         <div class="modal-header">
           <h3 id="modal-dxf-title">📂 Importación de plano CAD DXF: ${escapeHTML(fileName)}</h3>
           <button type="button" class="btn btn-sm btn-outline" id="btn-modal-close" aria-label="Cerrar ventana">✕</button>
         </div>
-        <div class="modal-body">
+        <div class="modal-body" style="overflow-y:auto;">
           <p style="margin-top:0;margin-bottom:12px;color:#94a3b8;font-size:11px;">
             TurnSim ha analizado el plano y ha asignado las capas que coinciden con la plantilla técnica recomendada.
             Puede confirmar o modificar la correspondencia de capas desde los desplegables:
           </p>
 
-          <!-- 1. EJE DE TRAYECTORIA -->
+          <!-- 1. EJES VIALES DE REFERENCIA (GUÍA Y SNAP) -->
           <div class="layer-field-row">
             <div class="layer-field-label">
-              <span>Eje / trayectoria del camión:</span>
-              ${trajMatchBadge}
+              <span>Ejes viales de referencia (guía visual + snap magnético):</span>
+              ${refAxesMatchBadge}
             </div>
-            <select id="modal-sel-trajectory" style="width:100%;">
-              ${buildOptions(suggested.trajectoryLayer, "-- No importar trayectoria (conservar actual) --")}
+            <select id="modal-sel-ref-axes" multiple size="3" style="width:100%;background:#0b1120;color:#f8fafc;border:1px solid #0891b2;border-radius:4px;padding:4px;">
+              ${buildMultiOptions(suggested.referenceAxisLayers || [])}
             </select>
-            <div class="layer-desc-hint">Polilínea o sucesión de aristas que debe recorrer el eje motriz de la tractora.</div>
-          </div>
-
-          <!-- Sentido y radio de acuerdo -->
-          <div class="form-row" style="margin-bottom:12px;">
-            <div>
-              <label class="form-label" for="modal-sel-dir">Sentido de marcha</label>
-              <select id="modal-sel-dir" style="width:100%;">
-                <option value="1" selected>Avance (sentido de dibujo)</option>
-                <option value="-1">Marcha atrás (retroceso)</option>
-              </select>
-            </div>
-            <div>
-              <label class="form-label" for="modal-inp-agreement">Radio mínimo de acuerdo (m)</label>
-              <input type="number" id="modal-inp-agreement" value="12.5" step="0.5" min="5" max="50" style="width:100%;" />
-            </div>
+            <div class="layer-desc-hint">Se muestran en cian eje-punto; al trazar ruta permiten imantar vértices y adoptar un eje con Shift+Clic.</div>
           </div>
 
           <!-- 2. OBSTÁCULOS Y EDIFICIOS -->
           <div class="layer-field-row">
             <div class="layer-field-label">
-              <span>Obstáculos físicos / edificaciones:</span>
+              <span>Obstáculos físicos / envolventes / edificaciones:</span>
               ${obsMatchBadge}
             </div>
             <select id="modal-sel-obstacles" multiple size="3" style="width:100%;background:#0b1120;color:#f8fafc;border:1px solid #334155;border-radius:4px;padding:4px;">
               ${buildMultiOptions(suggested.obstacleLayers)}
             </select>
-            <div class="layer-desc-hint">Elementos que provocan colisión física (mantenga pulsado Ctrl/Cmd para selección múltiple).</div>
+            <div class="layer-desc-hint">Líneas abiertas o polígonos que provocan colisión física (Ctrl/Cmd para selección múltiple).</div>
           </div>
 
           <!-- 3. BORDILLOS Y DELIMITACIONES -->
@@ -25380,11 +26166,70 @@ class SweptPathApp {
               ${buildMultiOptions(suggested.restrictedLayers)}
             </select>
           </div>
+
+          <!-- 5. EJE DE TRAYECTORIA DIRECTA (OPCIONAL) -->
+          <div class="layer-field-row">
+            <div class="layer-field-label">
+              <span>Trayectoria automática única (opcional):</span>
+              ${trajMatchBadge}
+            </div>
+            <select id="modal-sel-trajectory" style="width:100%;">
+              ${buildOptions(suggested.trajectoryLayer, "-- No importar trayectoria automática (trazar manualmente sobre el plano) --")}
+            </select>
+          </div>
+
+          <!-- Sentido y radio de acuerdo -->
+          <div class="form-row" style="margin-bottom:12px;">
+            <div>
+              <label class="form-label" for="modal-sel-dir">Sentido de marcha</label>
+              <select id="modal-sel-dir" style="width:100%;">
+                <option value="1" selected>Avance (sentido de dibujo)</option>
+                <option value="-1">Marcha atrás (retroceso)</option>
+              </select>
+            </div>
+            <div>
+              <label class="form-label" for="modal-inp-agreement">Radio mínimo de acuerdo (m)</label>
+              <input type="number" id="modal-inp-agreement" value="12.5" step="0.5" min="5" max="50" style="width:100%;" />
+            </div>
+          </div>
+
+          ${isUtmPreview ? `
+            <!-- GEORREFERENCIACIÓN UTM -> PNOA -->
+            <div class="layer-field-row" style="padding:8px;background:rgba(6,182,212,0.1);border:1px solid rgba(6,182,212,0.35);border-radius:6px;">
+              <label style="display:flex;align-items:center;gap:8px;font-size:11.5px;color:#e2e8f0;cursor:pointer;margin-bottom:6px;">
+                <input type="checkbox" id="modal-dxf-enable-pnoa" checked />
+                <span>🛰️ Coordenadas UTM detectadas: alinear ortofoto aérea PNOA (ETRS89)</span>
+              </label>
+              <div style="display:flex;align-items:center;gap:8px;">
+                <label class="form-label" for="modal-dxf-utm-zone" style="margin:0;white-space:nowrap;">Huso UTM:</label>
+                <select id="modal-dxf-utm-zone" style="flex:1;">
+                  <option value="28">Huso 28 (Canarias)</option>
+                  <option value="29">Huso 29 (Galicia / Oeste)</option>
+                  <option value="30" selected>Huso 30 (Centro / Península)</option>
+                  <option value="31">Huso 31 (Cataluña / Baleares)</option>
+                </select>
+              </div>
+            </div>
+          ` : ""}
+
+          <!-- 6. RESTO DE CAPAS CONTEXTUALES -->
+          <details style="margin-top:8px;border:1px solid #334155;border-radius:6px;padding:6px 8px;background:rgba(15,23,42,0.45);">
+            <summary style="cursor:pointer;font-size:11.5px;font-weight:600;color:#cbd5e1;">
+              Capas contextuales de fondo (desmarque las que desee omitir)
+            </summary>
+            <div style="display:flex;gap:8px;margin:6px 0;">
+              <button type="button" class="btn btn-xs btn-outline" id="btn-bg-layers-all">Todas</button>
+              <button type="button" class="btn btn-xs btn-outline" id="btn-bg-layers-none">Ninguna</button>
+            </div>
+            <div style="max-height:120px;overflow-y:auto;padding-right:4px;">
+              ${bgLayersHtml}
+            </div>
+          </details>
         </div>
 
         <div class="modal-footer">
           <button type="button" class="btn btn-outline btn-sm" id="btn-modal-cancel">Cancelar</button>
-          <button type="button" class="btn btn-primary btn-sm" id="btn-modal-apply">✓ Aplicar plano y simular</button>
+          <button type="button" class="btn btn-primary btn-sm" id="btn-modal-apply">✓ Aplicar plano</button>
         </div>
       </div>
     `;
@@ -25405,25 +26250,40 @@ class SweptPathApp {
     document.getElementById("btn-modal-close").addEventListener("click", closeModal);
     document.getElementById("btn-modal-cancel").addEventListener("click", closeModal);
 
+    document.getElementById("btn-bg-layers-all")?.addEventListener("click", () => {
+      backdrop.querySelectorAll(".modal-bg-layer-chk").forEach((c) => { c.checked = true; });
+    });
+    document.getElementById("btn-bg-layers-none")?.addEventListener("click", () => {
+      backdrop.querySelectorAll(".modal-bg-layer-chk").forEach((c) => { c.checked = false; });
+    });
+
     document.getElementById("btn-modal-apply").addEventListener("click", () => {
       const trajLayer = document.getElementById("modal-sel-trajectory").value || null;
 
       const getSelected = (selId) => {
         const el = document.getElementById(selId);
-        return Array.from(el.selectedOptions).map((o) => o.value);
+        return el ? Array.from(el.selectedOptions).map((o) => o.value) : [];
       };
 
+      const refAxisLayers = getSelected("modal-sel-ref-axes");
       const obsLayers = getSelected("modal-sel-obstacles");
       const bndLayers = getSelected("modal-sel-boundaries");
       const rstLayers = getSelected("modal-sel-restricted");
+      const excludedBackgroundLayers = Array.from(backdrop.querySelectorAll(".modal-bg-layer-chk"))
+        .filter((c) => !c.checked)
+        .map((c) => c.value);
       const direction = parseInt(document.getElementById("modal-sel-dir").value, 10) || 1;
       const agreementRadius = parseFloat(document.getElementById("modal-inp-agreement").value) || 12.5;
+      const enablePnoa = Boolean(document.getElementById("modal-dxf-enable-pnoa")?.checked);
+      const utmZone = parseInt(document.getElementById("modal-dxf-utm-zone")?.value, 10) || 30;
 
       const mapping = {
         trajectoryLayer: trajLayer,
+        referenceAxisLayers: refAxisLayers,
         obstacleLayers: obsLayers,
         boundaryLayers: bndLayers,
-        restrictedLayers: rstLayers
+        restrictedLayers: rstLayers,
+        excludedBackgroundLayers
       };
 
       try {
@@ -25435,11 +26295,10 @@ class SweptPathApp {
 
         if (scenario.maneuver && scenario.maneuver.segments && scenario.maneuver.segments.length > 0) {
           this.maneuver = scenario.maneuver;
+          this.viewer2D.clearWaypoints(true);
           this._populateManeuverInputs();
           this._renderSegmentsListUI();
         } else {
-          // Si el plano no incluye capa de trayectoria, se limpia la maniobra previa
-          // para dejar el plano CAD listo en el visor para trazar la ruta con ✏️ Trazar ruta
           this.maneuver = {
             startPose: {
               x: scenario.bounds ? Number((scenario.bounds.minX + 5).toFixed(2)) : 0,
@@ -25449,6 +26308,7 @@ class SweptPathApp {
             },
             segments: []
           };
+          this.viewer2D.clearWaypoints(true);
           this.simResult = null;
           this.interferenceReport = null;
           this._populateManeuverInputs();
@@ -25456,17 +26316,37 @@ class SweptPathApp {
         }
 
         this.obstacles = scenario.obstacles || [];
+        this.referenceAxes = scenario.referenceAxes || [];
+        this.cadBackgroundEntities = scenario.backgroundEntities || [];
         this._renderObstaclesListUI();
 
-        this.cadBackgroundEntities = scenario.backgroundEntities || [];
+        // Alineación PNOA si el DXF viene en UTM y el usuario la activó
+        let pnoaAligned = false;
+        if (enablePnoa && scenario.originOffset && scenario.isUtmLikely) {
+          const pnoaCfg = buildPnoaConfigFromUtmOrigin(scenario.originOffset, utmZone);
+          if (pnoaCfg) {
+            this._applyPnoaConfigToUI(pnoaCfg);
+            this.activeGeoOrigin = {
+              isUtm: true,
+              utmZone,
+              utmCenterX: scenario.originOffset.x,
+              utmCenterY: scenario.originOffset.y,
+              centerLon: pnoaCfg.centerLon,
+              centerLat: pnoaCfg.centerLat
+            };
+            pnoaAligned = true;
+          }
+        } else {
+          this.activeGeoOrigin = null;
+        }
 
-        // Asignar inmediatamente los datos a los visores para renderizado instantáneo del plano CAD
         this.viewer2D.setData({
           vehicle: this.vehicle,
           simResult: this.simResult,
           obstacles: this.obstacles,
           interferenceReport: this.interferenceReport,
-          cadBackgroundEntities: this.cadBackgroundEntities
+          cadBackgroundEntities: this.cadBackgroundEntities,
+          referenceAxes: this.referenceAxes
         });
 
         this.viewer3D.setData({
@@ -25475,20 +26355,24 @@ class SweptPathApp {
           obstacles: this.obstacles,
           interferenceReport: this.interferenceReport,
           cadBackgroundEntities: this.cadBackgroundEntities,
+          referenceAxes: this.referenceAxes,
           waypoints: this.viewer2D?.waypoints
         });
 
         closeModal();
 
-        // Si hay una maniobra válida, ejecutar simulación cinemática completa
         if (this.maneuver && this.maneuver.segments && this.maneuver.segments.length > 0) {
           this.recomputeAll(true);
         } else {
           this.viewer2D.fitToScene();
           this.viewer3D.fitToScene();
           this._updateTopTelemetryBar();
-          const totalEnts = this.cadBackgroundEntities.length + this.obstacles.length;
-          this.showToast(`Plano CAD cargado con éxito (${totalEnts} elementos geométricos). Puede trazar una ruta sobre el plano con el botón ✏️ Trazar ruta.`, "success");
+          const pnoaMsg = pnoaAligned ? " Ortofoto PNOA alineada." : "";
+          this.showToast(
+            `Plano DXF cargado: ${this.referenceAxes.length} ejes de referencia, ${this.obstacles.length} obstáculos, ${this.cadBackgroundEntities.length} elem. de fondo.${pnoaMsg}`,
+            "success",
+            4500
+          );
         }
       } catch (err) {
         console.error("Error al construir escenario desde DXF:", err);
