@@ -627,7 +627,7 @@ ${cssContent}
           <div id="pane-2d" class="viewport-pane">
             <div class="pane-badge">PLANTA TÉCNICA 2D (MÉTRICA CAD/GIS)</div>
             <div class="pane-toolbar">
-              <button type="button" id="btn-draw-waypoints" class="btn btn-sm btn-outline" style="background:rgba(15,23,42,0.85);color:#38bdf8;border-color:#0284c7;font-weight:600;" title="Activar trazado / edición interactiva de ruta por puntos de paso (clic en plano para añadir o mover waypoints)">✏️ Trazar ruta</button>
+              <button type="button" id="btn-draw-waypoints" class="btn btn-sm btn-outline" style="background:rgba(15,23,42,0.85);color:#38bdf8;border-color:#0284c7;font-weight:600;" title="Activar trazado / edición interactiva de ruta por puntos de paso (clic en plano para añadir o mover waypoints)">✏️ Trazar/Editar ruta</button>
               <button type="button" id="btn-toggle-draw-dir" class="btn btn-sm btn-outline" style="display:none;background:rgba(15,23,42,0.85);color:#38bdf8;border-color:#0284c7;font-weight:600;" title="Alternar sentido de trazado desde el último vértice (Atajo: tecla R)">▶ Avance (D)</button>
               <button type="button" id="btn-toggle-spline-mode" class="btn btn-sm btn-outline" style="background:rgba(15,23,42,0.85);font-size:11px;color:#38bdf8;border-color:#0284c7;" title="Alternar entre Spline CAD continua (sin quiebros en vértices) y Polilínea tradicional con acuerdos fijos">⚡ Spline CAD</button>
               <button type="button" id="btn-clear-path" class="btn btn-sm btn-outline" style="background:rgba(15,23,42,0.85);color:#f87171;border-color:#ef4444;" title="Borrar el trazado del vehículo y reiniciar la maniobra para empezar de nuevo" data-i18n="btn_clear_path">🗑️ Borrar trazado</button>

@@ -2297,7 +2297,7 @@ select option {
           <div id="pane-2d" class="viewport-pane">
             <div class="pane-badge">PLANTA TÉCNICA 2D (MÉTRICA CAD/GIS)</div>
             <div class="pane-toolbar">
-              <button type="button" id="btn-draw-waypoints" class="btn btn-sm btn-outline" style="background:rgba(15,23,42,0.85);color:#38bdf8;border-color:#0284c7;font-weight:600;" title="Activar trazado / edición interactiva de ruta por puntos de paso (clic en plano para añadir o mover waypoints)">✏️ Trazar ruta</button>
+              <button type="button" id="btn-draw-waypoints" class="btn btn-sm btn-outline" style="background:rgba(15,23,42,0.85);color:#38bdf8;border-color:#0284c7;font-weight:600;" title="Activar trazado / edición interactiva de ruta por puntos de paso (clic en plano para añadir o mover waypoints)">✏️ Trazar/Editar ruta</button>
               <button type="button" id="btn-toggle-draw-dir" class="btn btn-sm btn-outline" style="display:none;background:rgba(15,23,42,0.85);color:#38bdf8;border-color:#0284c7;font-weight:600;" title="Alternar sentido de trazado desde el último vértice (Atajo: tecla R)">▶ Avance (D)</button>
               <button type="button" id="btn-toggle-spline-mode" class="btn btn-sm btn-outline" style="background:rgba(15,23,42,0.85);font-size:11px;color:#38bdf8;border-color:#0284c7;" title="Alternar entre Spline CAD continua (sin quiebros en vértices) y Polilínea tradicional con acuerdos fijos">⚡ Spline CAD</button>
               <button type="button" id="btn-clear-path" class="btn btn-sm btn-outline" style="background:rgba(15,23,42,0.85);color:#f87171;border-color:#ef4444;" title="Borrar el trazado del vehículo y reiniciar la maniobra para empezar de nuevo" data-i18n="btn_clear_path">🗑️ Borrar trazado</button>
@@ -11372,7 +11372,7 @@ const LOCALES = {
     // Visores
     badge_pane_2d: "PLANTA TÉCNICA 2D (MÉTRICA CAD/GIS)",
     badge_pane_3d: "PERSPECTIVA 3D SINCRONIZADA (THREE.JS)",
-    btn_draw_route: "✏️ Trazar ruta",
+    btn_draw_route: "✏️ Trazar/Editar ruta",
     btn_draw_route_active: "✏️ Trazar [Activo]",
     btn_clear_path: "🗑️ Borrar trazado",
     lbl_auto_cusps: "Detectar cúspides marcha atrás automáticamente (> 125°)",
@@ -19850,6 +19850,8 @@ class Viewer2D {
     this.referenceAxes = []; // Ejes viales de referencia (guía visual + snap magnético + adopción)
     this.hoveredReferenceAxisIndex = -1;
     this.onAdoptReferenceAxis = null;
+    this.flashCircle = null;
+    this._flashRafId = null;
     this.isComputing = false;
 
     this.layers = {
@@ -20692,6 +20694,7 @@ class Viewer2D {
         this._drawEmptyStateNotice(ctx, w, h);
       }
 
+      this._drawFlashCircle(ctx);
       this._drawHUD(ctx, w, h);
       return;
     }
@@ -20794,8 +20797,93 @@ class Viewer2D {
     // 10. Medición interactiva de distancias
     this._drawMeasurement(ctx);
 
+    // 10.5 Círculo flash de localización rápida (Ir al PK)
+    this._drawFlashCircle(ctx);
+
     // 11. Escala gráfica, rosa de los vientos y coordenadas
     this._drawHUD(ctx, w, h);
+  }
+
+  /**
+   * Activa un círculo pulsante temporal sobre (wx, wy) para localizar visualmente un punto PK.
+   */
+  triggerFlashCircle(wx, wy, color = "#ef4444", durationMs = 2400) {
+    if (!Number.isFinite(wx) || !Number.isFinite(wy)) return;
+    if (this._flashRafId) {
+      cancelAnimationFrame(this._flashRafId);
+      this._flashRafId = null;
+    }
+    this.flashCircle = {
+      x: wx,
+      y: wy,
+      color,
+      startTime: performance.now(),
+      durationMs
+    };
+    const tick = () => {
+      if (!this.flashCircle) {
+        this._flashRafId = null;
+        return;
+      }
+      const elapsed = performance.now() - this.flashCircle.startTime;
+      if (elapsed >= this.flashCircle.durationMs) {
+        this.flashCircle = null;
+        this._flashRafId = null;
+        this.render();
+        return;
+      }
+      this.render();
+      this._flashRafId = requestAnimationFrame(tick);
+    };
+    this._flashRafId = requestAnimationFrame(tick);
+  }
+
+  _drawFlashCircle(ctx) {
+    if (!this.flashCircle) return;
+    const elapsed = performance.now() - this.flashCircle.startTime;
+    if (elapsed >= this.flashCircle.durationMs) return;
+
+    const [sx, sy] = this.worldToScreen(this.flashCircle.x, this.flashCircle.y);
+    const totalProgress = elapsed / this.flashCircle.durationMs;
+    const pulseCycles = 3;
+    const cyclePhase = (totalProgress * pulseCycles) % 1; // 0..1 en cada pulso
+    const fadeOut = 1 - Math.pow(totalProgress, 2);
+
+    const rOuter = 12 + cyclePhase * 42;
+    const rInner = 7 + cyclePhase * 18;
+    const alphaOuter = Math.max(0, (1 - cyclePhase) * 0.92 * fadeOut);
+    const alphaInner = Math.max(0, (1 - cyclePhase * 0.6) * 0.95 * fadeOut);
+    const col = this.flashCircle.color || "#ef4444";
+
+    ctx.save();
+    // Halo exterior expansivo
+    ctx.globalAlpha = alphaOuter;
+    ctx.strokeStyle = col;
+    ctx.lineWidth = 3.2;
+    ctx.beginPath();
+    ctx.arc(sx, sy, rOuter, 0, Math.PI * 2);
+    ctx.stroke();
+
+    // Segundo anillo interior
+    ctx.globalAlpha = alphaInner * 0.45;
+    ctx.fillStyle = col;
+    ctx.beginPath();
+    ctx.arc(sx, sy, rInner, 0, Math.PI * 2);
+    ctx.fill();
+
+    // Retícula fija en el centro del punto PK
+    ctx.globalAlpha = Math.max(0.25, fadeOut);
+    ctx.strokeStyle = "#ffffff";
+    ctx.lineWidth = 2.0;
+    ctx.beginPath();
+    ctx.arc(sx, sy, 6, 0, Math.PI * 2);
+    ctx.stroke();
+
+    ctx.fillStyle = col;
+    ctx.beginPath();
+    ctx.arc(sx, sy, 3.5, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.restore();
   }
 
   _drawPnoaLayer(ctx, width, height) {
@@ -21141,7 +21229,7 @@ class Viewer2D {
 
     ctx.font = "400 11.5px 'Segoe UI', system-ui, sans-serif";
     ctx.fillStyle = "#94a3b8";
-    ctx.fillText("✏️ Pulse «Trazar ruta» para dibujar una trayectoria sobre el plano", cx, cy + 14);
+    ctx.fillText("✏️ Pulse «Trazar/Editar ruta» para dibujar una trayectoria sobre el plano", cx, cy + 14);
     ctx.fillText("📂 O cargue un plano CAD (.DXF) o cartografía geoespacial (.GeoJSON)", cx, cy + 34);
 
     ctx.restore();
@@ -23432,26 +23520,111 @@ class SweptPathApp {
     };
     toast.innerHTML = `<span>${icons[type] || "ℹ️"}</span><span>${escapeHTML(message)}</span>`;
     container.appendChild(toast);
-    setTimeout(() => {
+
+    let remainingMs = Math.max(800, Number(durationMs) || 3500);
+    let startedAt = Date.now();
+    let hideTimer = null;
+    let isHovered = false;
+
+    const dismiss = () => {
       toast.style.opacity = "0";
       toast.style.transform = "translateY(8px)";
       setTimeout(() => toast.remove(), 260);
-    }, durationMs);
+    };
+
+    const scheduleDismiss = (delay) => {
+      if (hideTimer) clearTimeout(hideTimer);
+      startedAt = Date.now();
+      hideTimer = setTimeout(() => {
+        if (!isHovered) dismiss();
+      }, delay);
+    };
+
+    toast.addEventListener("mouseenter", () => {
+      isHovered = true;
+      if (hideTimer) {
+        clearTimeout(hideTimer);
+        hideTimer = null;
+      }
+      remainingMs = Math.max(1200, remainingMs - (Date.now() - startedAt));
+    });
+
+    toast.addEventListener("mouseleave", () => {
+      isHovered = false;
+      scheduleDismiss(remainingMs);
+    });
+
+    scheduleDismiss(remainingMs);
   }
 
-  jumpToFrame(frameIdx, centerPt = null) {
+  _buildCriticalToastInfo(repItem, fallbackStatus = null) {
+    if (!repItem) {
+      return { message: "No hay interacción crítica evaluada para saltar.", type: "info" };
+    }
+    const pkStr = Number.isFinite(repItem.distAlongPathM) ? `${repItem.distAlongPathM.toFixed(2)} m` : "—";
+    const obsName = repItem.name || "Obstáculo";
+    const status = repItem.status || fallbackStatus || "INFO";
+    const dist = Number.isFinite(repItem.minDistanceM) ? repItem.minDistanceM : null;
+
+    if (status === "COLLISION") {
+      return {
+        type: "danger",
+        message: `Colisión en PK ${pkStr} con «${obsName}»: la envolvente del vehículo invade físicamente el obstáculo (${repItem.statusLabel || "colisión geométrica"}).`
+      };
+    }
+    if (status === "RESTRICTED_INVASION") {
+      return {
+        type: "danger",
+        message: `Invasión de zona restringida en PK ${pkStr} en «${obsName}»: la trayectoria penetra en el área excluida.`
+      };
+    }
+    if (status === "MARGIN_VIOLATION") {
+      const distTxt = dist !== null ? `${dist.toFixed(2)} m` : "insuficiente";
+      return {
+        type: "warning",
+        message: `Margen insuficiente en PK ${pkStr} frente a «${obsName}»: separación libre de ${distTxt}, inferior al margen de seguridad (${this.safetyMarginM.toFixed(2)} m).`
+      };
+    }
+    if (status === "NOT_EVALUABLE") {
+      return {
+        type: "warning",
+        message: `Interacción no evaluable en PK ${pkStr} con «${obsName}»: ${repItem.statusLabel || "requiere verificación adicional"}.`
+      };
+    }
+    const clearTxt = dist !== null ? `${dist.toFixed(2)} m` : "verificada";
+    return {
+      type: "info",
+      message: `Punto más próximo en PK ${pkStr} frente a «${obsName}»: holgura libre de ${clearTxt} (cumple el margen de seguridad).`
+    };
+  }
+
+  jumpToFrame(frameIdx, centerPt = null, options = {}) {
     if (!this.simResult || !this.simResult.states.length) return;
     this.isPlaying = false;
     this._updatePlayButtonUI();
     this.currentFrameFloat = Math.max(0, Math.min(this.simResult.states.length - 1, frameIdx));
-    this.currentAnimDistM = this.simResult.states[Math.floor(this.currentFrameFloat)]?.dist ?? 0;
+    const clampedIdx = Math.floor(this.currentFrameFloat);
+    const activeState = this.simResult.states[clampedIdx];
+    this.currentAnimDistM = activeState?.dist ?? 0;
     const slider = document.getElementById("slider-timeline");
-    if (slider) slider.value = Math.floor(this.currentFrameFloat);
-    if (centerPt && Array.isArray(centerPt)) {
-      this.viewer2D.camX = centerPt[0];
-      this.viewer2D.camY = centerPt[1];
+    if (slider) slider.value = clampedIdx;
+
+    const targetPt = (centerPt && Array.isArray(centerPt))
+      ? centerPt
+      : (activeState ? [activeState.x, activeState.y] : null);
+
+    if (targetPt) {
+      this.viewer2D.camX = targetPt[0];
+      this.viewer2D.camY = targetPt[1];
+      if (options.zoomToPoint) {
+        this.viewer2D.scale = Math.max(this.viewer2D.scale, 18.0);
+      }
     }
-    this._syncFrameToViewers(Math.floor(this.currentFrameFloat));
+    this._syncFrameToViewers(clampedIdx);
+
+    if (options.flash && targetPt) {
+      this.viewer2D.triggerFlashCircle(targetPt[0], targetPt[1], options.flashColor || "#ef4444");
+    }
   }
 
   toggleSidebar(forceState) {
@@ -23582,7 +23755,7 @@ class SweptPathApp {
     const btnDir = document.getElementById("btn-toggle-draw-dir");
     if (btn) {
       btn.classList.toggle("active", isActive);
-      btn.textContent = isActive ? "✏️ Trazar [Activo]" : "✏️ Trazar ruta";
+      btn.textContent = isActive ? "✏️ Trazar [Activo]" : "✏️ Trazar/Editar ruta";
     }
     if (btnSidebar) {
       btnSidebar.classList.toggle("active", isActive);
@@ -24235,7 +24408,7 @@ class SweptPathApp {
     this.viewer2D.onWaypointModeChange = (isActive) => {
       if (btnWaypoints) {
         btnWaypoints.classList.toggle("active", isActive);
-        btnWaypoints.textContent = isActive ? "✏️ Trazar [Activo]" : "✏️ Trazar ruta";
+        btnWaypoints.textContent = isActive ? "✏️ Trazar [Activo]" : "✏️ Trazar/Editar ruta";
       }
       if (btnWaypointsSidebar) {
         btnWaypointsSidebar.classList.toggle("active", isActive);
@@ -24249,16 +24422,19 @@ class SweptPathApp {
       btnJumpCritical.addEventListener("click", () => {
         const rep = this.interferenceReport;
         if (rep && rep.criticalInteraction && rep.criticalInteraction.stepIndex !== undefined) {
+          const crit = rep.criticalInteraction;
+          const flashColor = rep.globalStatus === "COLLISION" || rep.globalStatus === "RESTRICTED_INVASION"
+            ? "#ef4444"
+            : (rep.globalStatus === "CLEAR" ? "#38bdf8" : "#f59e0b");
           this.jumpToFrame(
-            rep.criticalInteraction.stepIndex,
-            rep.criticalInteraction.pointOnVehicle || rep.criticalInteraction.pointOnObstacle
+            crit.stepIndex,
+            crit.pointOnVehicle || crit.pointOnObstacle,
+            { zoomToPoint: true, flash: true, flashColor }
           );
-          this.showToast(
-            `Situado en punto crítico: PK ${rep.criticalInteraction.distAlongPathM.toFixed(2)} m (${rep.criticalInteraction.name} · ${rep.criticalInteraction.statusLabel})`,
-            rep.globalStatus === "COLLISION" ? "danger" : rep.globalStatus === "CLEAR" ? "info" : "warning"
-          );
+          const toastInfo = this._buildCriticalToastInfo(crit, rep.globalStatus);
+          this.showToast(toastInfo.message, toastInfo.type, 5000);
         } else {
-          this.showToast("No hay interacción crítica evaluada para saltar.", "info");
+          this.showToast("No hay interacción crítica evaluada para saltar.", "info", 5000);
         }
       });
     }
@@ -24903,7 +25079,7 @@ class SweptPathApp {
     container.innerHTML = "";
 
     if (!this.maneuver.segments || this.maneuver.segments.length === 0) {
-      container.innerHTML = `<div style="padding:10px;text-align:center;color:#64748b;font-size:11px;border:1px dashed #334155;border-radius:4px;">No hay tramos configurados. Trace una ruta con ✏️ Trazar ruta o añada un tramo manual.</div>`;
+      container.innerHTML = `<div style="padding:10px;text-align:center;color:#64748b;font-size:11px;border:1px dashed #334155;border-radius:4px;">No hay tramos configurados. Trace una ruta con ✏️ Trazar/Editar ruta o añada un tramo manual.</div>`;
       return;
     }
 
@@ -25131,11 +25307,16 @@ class SweptPathApp {
       const jumpBtnEl = header.querySelector(".btn-jump-pk");
       if (jumpBtnEl && rep) {
         jumpBtnEl.addEventListener("click", () => {
-          this.jumpToFrame(rep.stepIndex, rep.pointOnVehicle || rep.pointOnObstacle);
-          this.showToast(
-            `Visualizando interferencia en PK ${rep.distAlongPathM.toFixed(2)} m (${rep.statusLabel})`,
-            rep.status === "COLLISION" ? "danger" : "warning"
+          const flashColor = rep.status === "COLLISION" || rep.status === "RESTRICTED_INVASION"
+            ? "#ef4444"
+            : (rep.status === "CLEAR" ? "#38bdf8" : "#f59e0b");
+          this.jumpToFrame(
+            rep.stepIndex,
+            rep.pointOnVehicle || rep.pointOnObstacle,
+            { zoomToPoint: true, flash: true, flashColor }
           );
+          const toastInfo = this._buildCriticalToastInfo(rep);
+          this.showToast(toastInfo.message, toastInfo.type, 5000);
         });
       }
 
@@ -25561,14 +25742,17 @@ class SweptPathApp {
         statusBadge.style.cursor = "pointer";
         statusBadge.title = `Haga clic para saltar al punto crítico en PK ${rep.criticalInteraction.distAlongPathM?.toFixed(2) ?? 0} m`;
         statusBadge.onclick = () => {
+          const crit = rep.criticalInteraction;
+          const flashColor = rep.globalStatus === "COLLISION" || rep.globalStatus === "RESTRICTED_INVASION"
+            ? "#ef4444"
+            : "#f59e0b";
           this.jumpToFrame(
-            rep.criticalInteraction.stepIndex,
-            rep.criticalInteraction.pointOnVehicle || rep.criticalInteraction.pointOnObstacle
+            crit.stepIndex,
+            crit.pointOnVehicle || crit.pointOnObstacle,
+            { zoomToPoint: true, flash: true, flashColor }
           );
-          this.showToast(
-            `Punto crítico: PK ${rep.criticalInteraction.distAlongPathM.toFixed(2)} m (${rep.criticalInteraction.statusLabel})`,
-            rep.globalStatus === "COLLISION" ? "danger" : "warning"
-          );
+          const toastInfo = this._buildCriticalToastInfo(crit, rep.globalStatus);
+          this.showToast(toastInfo.message, toastInfo.type, 5000);
         };
       } else {
         statusBadge.style.cursor = "default";
@@ -26062,7 +26246,7 @@ class SweptPathApp {
 
     const trajMatchBadge = suggested.trajectoryLayer
       ? `<span class="layer-match-badge">✓ Detectada automáticamente</span>`
-      : `<span style="font-size:10px;color:#94a3b8;">Opcional (recomendado usar Ejes de referencia + Trazar ruta)</span>`;
+      : `<span style="font-size:10px;color:#94a3b8;">Opcional (recomendado usar Ejes de referencia + Trazar/Editar ruta)</span>`;
 
     const obsMatchBadge = suggested.obstacleLayers.length > 0
       ? `<span class="layer-match-badge">✓ ${suggested.obstacleLayers.length} capa(s) sugeridas</span>`

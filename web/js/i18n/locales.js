@@ -124,7 +124,7 @@ export const LOCALES = {
     // Visores
     badge_pane_2d: "PLANTA TÉCNICA 2D (MÉTRICA CAD/GIS)",
     badge_pane_3d: "PERSPECTIVA 3D SINCRONIZADA (THREE.JS)",
-    btn_draw_route: "✏️ Trazar ruta",
+    btn_draw_route: "✏️ Trazar/Editar ruta",
     btn_draw_route_active: "✏️ Trazar [Activo]",
     btn_clear_path: "🗑️ Borrar trazado",
     lbl_auto_cusps: "Detectar cúspides marcha atrás automáticamente (> 125°)",

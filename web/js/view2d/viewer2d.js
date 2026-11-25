@@ -82,6 +82,8 @@ export class Viewer2D {
     this.referenceAxes = []; // Ejes viales de referencia (guía visual + snap magnético + adopción)
     this.hoveredReferenceAxisIndex = -1;
     this.onAdoptReferenceAxis = null;
+    this.flashCircle = null;
+    this._flashRafId = null;
     this.isComputing = false;
 
     this.layers = {
@@ -924,6 +926,7 @@ export class Viewer2D {
         this._drawEmptyStateNotice(ctx, w, h);
       }
 
+      this._drawFlashCircle(ctx);
       this._drawHUD(ctx, w, h);
       return;
     }
@@ -1026,8 +1029,93 @@ export class Viewer2D {
     // 10. Medición interactiva de distancias
     this._drawMeasurement(ctx);
 
+    // 10.5 Círculo flash de localización rápida (Ir al PK)
+    this._drawFlashCircle(ctx);
+
     // 11. Escala gráfica, rosa de los vientos y coordenadas
     this._drawHUD(ctx, w, h);
+  }
+
+  /**
+   * Activa un círculo pulsante temporal sobre (wx, wy) para localizar visualmente un punto PK.
+   */
+  triggerFlashCircle(wx, wy, color = "#ef4444", durationMs = 2400) {
+    if (!Number.isFinite(wx) || !Number.isFinite(wy)) return;
+    if (this._flashRafId) {
+      cancelAnimationFrame(this._flashRafId);
+      this._flashRafId = null;
+    }
+    this.flashCircle = {
+      x: wx,
+      y: wy,
+      color,
+      startTime: performance.now(),
+      durationMs
+    };
+    const tick = () => {
+      if (!this.flashCircle) {
+        this._flashRafId = null;
+        return;
+      }
+      const elapsed = performance.now() - this.flashCircle.startTime;
+      if (elapsed >= this.flashCircle.durationMs) {
+        this.flashCircle = null;
+        this._flashRafId = null;
+        this.render();
+        return;
+      }
+      this.render();
+      this._flashRafId = requestAnimationFrame(tick);
+    };
+    this._flashRafId = requestAnimationFrame(tick);
+  }
+
+  _drawFlashCircle(ctx) {
+    if (!this.flashCircle) return;
+    const elapsed = performance.now() - this.flashCircle.startTime;
+    if (elapsed >= this.flashCircle.durationMs) return;
+
+    const [sx, sy] = this.worldToScreen(this.flashCircle.x, this.flashCircle.y);
+    const totalProgress = elapsed / this.flashCircle.durationMs;
+    const pulseCycles = 3;
+    const cyclePhase = (totalProgress * pulseCycles) % 1; // 0..1 en cada pulso
+    const fadeOut = 1 - Math.pow(totalProgress, 2);
+
+    const rOuter = 12 + cyclePhase * 42;
+    const rInner = 7 + cyclePhase * 18;
+    const alphaOuter = Math.max(0, (1 - cyclePhase) * 0.92 * fadeOut);
+    const alphaInner = Math.max(0, (1 - cyclePhase * 0.6) * 0.95 * fadeOut);
+    const col = this.flashCircle.color || "#ef4444";
+
+    ctx.save();
+    // Halo exterior expansivo
+    ctx.globalAlpha = alphaOuter;
+    ctx.strokeStyle = col;
+    ctx.lineWidth = 3.2;
+    ctx.beginPath();
+    ctx.arc(sx, sy, rOuter, 0, Math.PI * 2);
+    ctx.stroke();
+
+    // Segundo anillo interior
+    ctx.globalAlpha = alphaInner * 0.45;
+    ctx.fillStyle = col;
+    ctx.beginPath();
+    ctx.arc(sx, sy, rInner, 0, Math.PI * 2);
+    ctx.fill();
+
+    // Retícula fija en el centro del punto PK
+    ctx.globalAlpha = Math.max(0.25, fadeOut);
+    ctx.strokeStyle = "#ffffff";
+    ctx.lineWidth = 2.0;
+    ctx.beginPath();
+    ctx.arc(sx, sy, 6, 0, Math.PI * 2);
+    ctx.stroke();
+
+    ctx.fillStyle = col;
+    ctx.beginPath();
+    ctx.arc(sx, sy, 3.5, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.restore();
   }
 
   _drawPnoaLayer(ctx, width, height) {
@@ -1373,7 +1461,7 @@ export class Viewer2D {
 
     ctx.font = "400 11.5px 'Segoe UI', system-ui, sans-serif";
     ctx.fillStyle = "#94a3b8";
-    ctx.fillText("✏️ Pulse «Trazar ruta» para dibujar una trayectoria sobre el plano", cx, cy + 14);
+    ctx.fillText("✏️ Pulse «Trazar/Editar ruta» para dibujar una trayectoria sobre el plano", cx, cy + 14);
     ctx.fillText("📂 O cargue un plano CAD (.DXF) o cartografía geoespacial (.GeoJSON)", cx, cy + 34);
 
     ctx.restore();
