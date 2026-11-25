@@ -286,7 +286,7 @@ ${cssContent}
               <summary><h2>A. Selección de vehículo de diseño</h2></summary>
               <div class="section-body">
                 <div class="form-group">
-                  <label class="form-label" for="select-vehicle">Conjunto articulado preconfigurado</label>
+                  <label class="form-label" for="select-vehicle">Vehículo preconfigurado</label>
                   <select id="select-vehicle"></select>
                 </div>
 

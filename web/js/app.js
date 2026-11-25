@@ -109,9 +109,9 @@ export class SweptPathApp {
     this.isCurvesPanelOpen = false;
 
     // Estado activo
-    this.selectedVehicleId = "renault_t_4x2_sko";
-    this.selectedTractorKey = "renault_t_480";
-    this.selectedTrailerKey = "schmitz_sko_cool";
+    this.selectedVehicleId = "spain_camion_articulado_t";
+    this.selectedTractorKey = "spain_tractor_t";
+    this.selectedTrailerKey = "spain_semitrailer_t";
     this.vehicle = cloneVehicleProfile(this.selectedVehicleId);
     this.isCustomModified = false;
     this.trajectoryMode = "spline"; // 'spline' (Spline CAD continua) | 'fillet' (Polilínea con acuerdos)
@@ -304,8 +304,8 @@ export class SweptPathApp {
     if (!s) return;
     this.vehicle = JSON.parse(JSON.stringify(s.vehicle));
     this.selectedVehicleId = s.selectedVehicleId || "custom";
-    this.selectedTractorKey = s.selectedTractorKey || (s.vehicle?.tractorKey || "renault_t_480");
-    this.selectedTrailerKey = s.selectedTrailerKey || (s.vehicle?.trailerKey || "schmitz_sko_cool");
+    this.selectedTractorKey = s.selectedTractorKey || (s.vehicle?.tractorKey || "spain_tractor_t");
+    this.selectedTrailerKey = s.selectedTrailerKey || (s.vehicle?.trailerKey || "spain_semitrailer_t");
     this.selectedScenarioId = s.selectedScenarioId || this.selectedScenarioId;
     this.maneuver = JSON.parse(JSON.stringify(s.maneuver));
     this.obstacles = JSON.parse(JSON.stringify(s.obstacles));
