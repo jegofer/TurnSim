@@ -114,6 +114,8 @@ export class Viewer2D {
     this.pnoaTileCache = new Map();
 
     this.isDragging = false;
+    this._rightDragMoved = false;
+    this._rightDragStart = null;
     this.draggedObstacle = null;
     this.lastMouse = { x: 0, y: 0 };
     this.hoverWorld = null;
@@ -164,9 +166,13 @@ export class Viewer2D {
 
     this.canvas.addEventListener("contextmenu", (e) => {
       e.preventDefault();
+      if (this._rightDragMoved) {
+        this._rightDragMoved = false;
+        return;
+      }
       const rect = this.canvas.getBoundingClientRect();
       const [wx, wy] = this.screenToWorld(e.clientX - rect.left, e.clientY - rect.top);
-      const hitIdx = this._findWaypointAt(wx, wy);
+      const hitIdx = this.waypointMode ? this._findWaypointAt(wx, wy) : -1;
       if (hitIdx >= 0 && typeof this.onWaypointContextMenu === "function") {
         this.onWaypointContextMenu({
           index: hitIdx,
@@ -220,7 +226,15 @@ export class Viewer2D {
       this.lastMouse = { x: mx, y: my };
       const [wx, wy] = this.screenToWorld(mx, my);
 
-      if (e.button === 2) {
+      if (e.button === 2 || e.button === 1) {
+        this.isDragging = true;
+        this._rightDragMoved = false;
+        this._rightDragStart = { x: mx, y: my };
+        this.canvas.style.cursor = "grabbing";
+        try {
+          this.canvas.setPointerCapture(e.pointerId);
+          this._capturedPointerId = e.pointerId;
+        } catch (_) {}
         return;
       }
       if (e.button !== 0) return;
@@ -361,6 +375,20 @@ export class Viewer2D {
         return;
       }
 
+      if (this.isDragging) {
+        const dx = mx - this.lastMouse.x;
+        const dy = my - this.lastMouse.y;
+        this.lastMouse = { x: mx, y: my };
+        if (this._rightDragStart && Math.hypot(mx - this._rightDragStart.x, my - this._rightDragStart.y) > 4) {
+          this._rightDragMoved = true;
+        }
+        this.camX -= dx / this.scale;
+        this.camY += dy / this.scale;
+        this.canvas.style.cursor = "grabbing";
+        this.render();
+        return;
+      }
+
       if (this.waypointMode) {
         const prevHover = this.hoveredWaypointIndex;
         const prevAxisHover = this.hoveredReferenceAxisIndex;
@@ -404,14 +432,6 @@ export class Viewer2D {
         this.render();
         return;
       }
-
-      if (!this.isDragging) return;
-      const dx = mx - this.lastMouse.x;
-      const dy = my - this.lastMouse.y;
-      this.lastMouse = { x: mx, y: my };
-      this.camX -= dx / this.scale;
-      this.camY += dy / this.scale;
-      this.render();
     });
 
     const onPointerEnd = (e) => {
@@ -433,8 +453,13 @@ export class Viewer2D {
       if (this.draggedObstacle && typeof this.onObstacleDragEnd === "function") {
         this.onObstacleDragEnd(this.draggedObstacle);
       }
+      const wasDragging = this.isDragging;
       this.isDragging = false;
+      this._rightDragStart = null;
       this.draggedObstacle = null;
+      if (wasDragging) {
+        this.canvas.style.cursor = this.waypointMode || this.measureMode ? "crosshair" : "default";
+      }
     };
 
     window.addEventListener("pointerup", onPointerEnd);
@@ -2053,7 +2078,7 @@ export class Viewer2D {
       const axisHint = (this.referenceAxes && this.referenceAxes.length > 0 && this.layers.referenceAxes)
         ? " · Shift+Clic eje: adoptar · Alt: sin snap"
         : "";
-      const bannerText = `✏️ [${modeLabel} · ${dirLabel}]: Clic añadir · Tecla R: invertir${axisHint}${sharpWarning}`;
+      const bannerText = `✏️ [${modeLabel} · ${dirLabel}]: Clic añadir · Clic dcho. arrastrar: mover vista · Tecla R: invertir${axisHint}${sharpWarning}`;
       ctx.font = "600 11px 'Segoe UI', system-ui, sans-serif";
       const bw = ctx.measureText(bannerText).width + 24;
       const bx = (this.width - bw) / 2;
