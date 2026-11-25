@@ -19882,6 +19882,7 @@ class Viewer2D {
     this.pnoaTileCache = new Map();
 
     this.isDragging = false;
+    this._mousePanning = false;
     this._rightDragMoved = false;
     this._rightDragStart = null;
     this.draggedObstacle = null;
@@ -19934,24 +19935,65 @@ class Viewer2D {
 
     this.canvas.addEventListener("contextmenu", (e) => {
       e.preventDefault();
-      if (this._rightDragMoved) {
+    });
+
+    // Paneo robusto con botón secundario (derecho) o central (rueda) mediante Mouse Events,
+    // evitando que `contextmenu` / `pointercancel` en Linux/macOS corte el arrastre.
+    this.canvas.addEventListener("mousedown", (e) => {
+      if (e.button === 2 || e.button === 1) {
+        e.preventDefault();
+        const rect = this.canvas.getBoundingClientRect();
+        const mx = e.clientX - rect.left;
+        const my = e.clientY - rect.top;
+        this._mousePanning = true;
         this._rightDragMoved = false;
-        return;
+        this._rightDragStart = { x: mx, y: my };
+        this.lastMouse = { x: mx, y: my };
+        this.canvas.style.cursor = "grabbing";
       }
+    });
+
+    window.addEventListener("mousemove", (e) => {
+      if (!this._mousePanning) return;
       const rect = this.canvas.getBoundingClientRect();
-      const [wx, wy] = this.screenToWorld(e.clientX - rect.left, e.clientY - rect.top);
-      const hitIdx = this.waypointMode ? this._findWaypointAt(wx, wy) : -1;
-      if (hitIdx >= 0 && typeof this.onWaypointContextMenu === "function") {
-        this.onWaypointContextMenu({
-          index: hitIdx,
-          clientX: e.clientX,
-          clientY: e.clientY,
-          waypoint: this.waypoints[hitIdx]
-        });
-        return;
+      const mx = e.clientX - rect.left;
+      const my = e.clientY - rect.top;
+      const dx = mx - this.lastMouse.x;
+      const dy = my - this.lastMouse.y;
+      this.lastMouse = { x: mx, y: my };
+      if (this._rightDragStart && Math.hypot(mx - this._rightDragStart.x, my - this._rightDragStart.y) > 4) {
+        this._rightDragMoved = true;
       }
-      if (this.measureMode || this.measurePoints.length > 0) {
-        this.clearMeasurement();
+      this.camX -= dx / this.scale;
+      this.camY += dy / this.scale;
+      this.canvas.style.cursor = "grabbing";
+      this.render();
+    });
+
+    window.addEventListener("mouseup", (e) => {
+      if (!this._mousePanning || (e.button !== 2 && e.button !== 1)) return;
+      const wasMoved = this._rightDragMoved;
+      this._mousePanning = false;
+      this._rightDragMoved = false;
+      this._rightDragStart = null;
+      this.canvas.style.cursor = this.waypointMode || this.measureMode ? "crosshair" : "default";
+
+      if (!wasMoved && e.button === 2) {
+        const rect = this.canvas.getBoundingClientRect();
+        const [wx, wy] = this.screenToWorld(e.clientX - rect.left, e.clientY - rect.top);
+        const hitIdx = this.waypointMode ? this._findWaypointAt(wx, wy) : -1;
+        if (hitIdx >= 0 && typeof this.onWaypointContextMenu === "function") {
+          this.onWaypointContextMenu({
+            index: hitIdx,
+            clientX: e.clientX,
+            clientY: e.clientY,
+            waypoint: this.waypoints[hitIdx]
+          });
+          return;
+        }
+        if (this.measureMode || this.measurePoints.length > 0) {
+          this.clearMeasurement();
+        }
       }
     });
 
@@ -19994,17 +20036,6 @@ class Viewer2D {
       this.lastMouse = { x: mx, y: my };
       const [wx, wy] = this.screenToWorld(mx, my);
 
-      if (e.button === 2 || e.button === 1) {
-        this.isDragging = true;
-        this._rightDragMoved = false;
-        this._rightDragStart = { x: mx, y: my };
-        this.canvas.style.cursor = "grabbing";
-        try {
-          this.canvas.setPointerCapture(e.pointerId);
-          this._capturedPointerId = e.pointerId;
-        } catch (_) {}
-        return;
-      }
       if (e.button !== 0) return;
 
       try {
@@ -20143,13 +20174,12 @@ class Viewer2D {
         return;
       }
 
+      if (this._mousePanning) return;
+
       if (this.isDragging) {
         const dx = mx - this.lastMouse.x;
         const dy = my - this.lastMouse.y;
         this.lastMouse = { x: mx, y: my };
-        if (this._rightDragStart && Math.hypot(mx - this._rightDragStart.x, my - this._rightDragStart.y) > 4) {
-          this._rightDragMoved = true;
-        }
         this.camX -= dx / this.scale;
         this.camY += dy / this.scale;
         this.canvas.style.cursor = "grabbing";
